@@ -1,0 +1,30 @@
+[package]
+name = "leakguard"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+authors = ["ptukovar","github.com/ptukovar"]
+description = "Fast, zero-dependency redaction of secrets and PII (emails, credit cards, IPs, JWTs, API keys, and more) from text and logs."
+documentation = "https://docs.rs/leakguard"
+repository = "https://github.com/ptukovar/leakguard"
+homepage = "https://github.com/ptukovar/leakguard"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["redaction", "pii", "secrets", "logging", "privacy"]
+categories = ["text-processing", "command-line-utilities", "value-formatting"]
+exclude = ["/.github", "/assets"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+[[bin]]
+name = "leakguard"
+path = "src/bin/leakguard.rs"
+required-features = ["std"]
+
+[features]
+default = ["std"]
+std = []
