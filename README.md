@@ -1,6 +1,6 @@
 <div align="center">
 
-# leakguard
+# leakguard :P
 
 **Fast, zero-dependency redaction of secrets & PII from text and logs — in pure Rust.**
 
