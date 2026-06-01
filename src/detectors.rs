@@ -200,17 +200,20 @@ impl Detector for CreditCard {
         let b = input.as_bytes();
         let mut i = 0;
         while i < b.len() {
-            if !is_ascii_digit(b[i]) || (i > 0 && (is_ascii_digit(b[i - 1]))) {
+            if !is_ascii_digit(b[i]) || (i > 0 && is_ascii_digit(b[i - 1])) {
                 i += 1;
                 continue;
             }
-            // Greedily consume digits with internal single spaces/hyphens.
             let mut j = i;
-            let mut digits: Vec<u8> = Vec::with_capacity(19);
+            let mut digits = [0u8; 19];
+            let mut dlen = 0usize;
             let mut end = i;
             while j < b.len() {
                 if is_ascii_digit(b[j]) {
-                    digits.push(b[j]);
+                    if dlen < 19 {
+                        digits[dlen] = b[j];
+                        dlen += 1;
+                    }
                     j += 1;
                     end = j;
                 } else if (b[j] == b' ' || b[j] == b'-')
@@ -221,13 +224,12 @@ impl Detector for CreditCard {
                 } else {
                     break;
                 }
-                if digits.len() > 19 {
+                if dlen > 19 {
                     break;
                 }
             }
-            // Don't match if a digit immediately follows (overlong number).
             let trailing_digit = end < b.len() && is_ascii_digit(b[end]);
-            if (13..=19).contains(&digits.len()) && !trailing_digit && luhn_ok(&digits) {
+            if (13..=19).contains(&dlen) && !trailing_digit && luhn_ok(&digits[..dlen]) {
                 out.push(Match::new(Kind::CreditCard, i, end));
                 i = end;
             } else {
