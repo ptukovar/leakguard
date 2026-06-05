@@ -200,17 +200,25 @@ impl Detector for CreditCard {
         let b = input.as_bytes();
         let mut i = 0;
         while i < b.len() {
-            if !is_ascii_digit(b[i]) || (i > 0 && (is_ascii_digit(b[i - 1]))) {
+            let preceded_by_digit_or_sep_digit = i > 0
+                && (is_ascii_digit(b[i - 1])
+                    || ((b[i - 1] == b' ' || b[i - 1] == b'-')
+                        && i > 1
+                        && is_ascii_digit(b[i - 2])));
+            if !is_ascii_digit(b[i]) || preceded_by_digit_or_sep_digit {
                 i += 1;
                 continue;
             }
-            // Greedily consume digits with internal single spaces/hyphens.
             let mut j = i;
-            let mut digits: Vec<u8> = Vec::with_capacity(19);
+            let mut digits = [0u8; 19];
+            let mut total_digits = 0usize;
             let mut end = i;
             while j < b.len() {
                 if is_ascii_digit(b[j]) {
-                    digits.push(b[j]);
+                    if total_digits < digits.len() {
+                        digits[total_digits] = b[j];
+                    }
+                    total_digits += 1;
                     j += 1;
                     end = j;
                 } else if (b[j] == b' ' || b[j] == b'-')
@@ -221,13 +229,12 @@ impl Detector for CreditCard {
                 } else {
                     break;
                 }
-                if digits.len() > 19 {
-                    break;
-                }
             }
-            // Don't match if a digit immediately follows (overlong number).
             let trailing_digit = end < b.len() && is_ascii_digit(b[end]);
-            if (13..=19).contains(&digits.len()) && !trailing_digit && luhn_ok(&digits) {
+            if (13..=19).contains(&total_digits)
+                && !trailing_digit
+                && luhn_ok(&digits[..total_digits])
+            {
                 out.push(Match::new(Kind::CreditCard, i, end));
                 i = end;
             } else {
@@ -1042,9 +1049,12 @@ fn shannon_entropy(s: &[u8]) -> f64 {
             distinct += 1;
         }
     }
-    // Approximate bits/char by log2(distinct) using an integer bit length.
-    let bits = (usize::BITS - distinct.next_power_of_two().leading_zeros()) as f64;
-    bits.max(0.0)
+    // Approximate bits/char by ceil(log2(distinct)) using an integer bit length.
+    if distinct <= 1 {
+        0.0
+    } else {
+        (usize::BITS - (distinct - 1).leading_zeros()) as f64
+    }
 }
 
 impl Detector for HighEntropy {

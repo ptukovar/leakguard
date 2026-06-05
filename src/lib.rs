@@ -76,8 +76,10 @@ pub enum Mask {
     /// Replace with `[REDACTED:<LABEL>]`, e.g. `[REDACTED:EMAIL]`. The default.
     #[default]
     Label,
-    /// Replace with a fixed string for every match.
+    /// Replace with a fixed string literal for every match.
     Fixed(&'static str),
+    /// Replace with an owned fixed string for every match.
+    FixedOwned(String),
     /// Replace each *character* of the match with `ch`.
     Char(char),
     /// Keep the last `keep_last` characters; replace the rest with `ch`.
@@ -87,10 +89,19 @@ pub enum Mask {
         /// Fill character for the masked portion.
         ch: char,
     },
-    /// Replace with a SHA-like short fingerprint so equal values stay equal but
-    /// the original is not recoverable. (Uses a fast non-cryptographic hash,
-    /// suitable for correlation, **not** for security.)
+    /// Replace with a short, stable, non-cryptographic fingerprint so equal
+    /// values stay equal. This is intended for correlation, **not** for
+    /// anonymization or security against guessing/dictionary attacks.
     Hash,
+}
+
+impl Mask {
+    /// Build a fixed-string mask from a runtime string.
+    ///
+    /// For string literals, [`Mask::Fixed`] is still the most compact option.
+    pub fn fixed<S: Into<String>>(s: S) -> Self {
+        Self::FixedOwned(s.into())
+    }
 }
 
 /// The main entry point: configure detectors + a [`Mask`], then [`clean`](Redactor::clean).
@@ -202,6 +213,7 @@ impl Redactor {
         match &self.mask {
             Mask::Label => format!("[REDACTED:{}]", m.kind.label()),
             Mask::Fixed(s) => String::from(*s),
+            Mask::FixedOwned(s) => s.clone(),
             Mask::Char(c) => core::iter::repeat(*c)
                 .take(original.chars().count())
                 .collect(),

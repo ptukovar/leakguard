@@ -35,6 +35,17 @@ fn credit_card_luhn() {
 }
 
 #[test]
+fn credit_card_rejects_more_than_19_digits() {
+    let s = Redactor::only(&[Kind::CreditCard]);
+    // First 19 digits pass Luhn, but the full candidate has 20 digits.
+    let long = "41111111111111000060";
+    assert_eq!(s.clean(long), long);
+    // Also reject long grouped candidates instead of redacting a suffix group.
+    let grouped = "4111 1111 1111 1100 0060";
+    assert_eq!(s.clean(grouped), grouped);
+}
+
+#[test]
 fn ipv4_range_checked() {
     let s = Redactor::only(&[Kind::IpV4]);
     assert_eq!(s.clean("from 192.168.0.1!"), "from [REDACTED:IPV4]!");
@@ -109,6 +120,10 @@ fn masks() {
 
     let s = Redactor::only(&[Kind::Email]).mask(Mask::Char('#'));
     assert_eq!(s.clean("a@b.com"), "#######");
+
+    let replacement = String::from("<hidden>");
+    let s = Redactor::only(&[Kind::IpV4]).mask(Mask::fixed(replacement));
+    assert_eq!(s.clean("ip 10.0.0.1"), "ip <hidden>");
 }
 
 #[test]
@@ -176,7 +191,7 @@ fn clean_idempotent_when_nothing_matches() {
     assert!(!s.is_dirty(input));
 }
 
-// --- Added in 0.2: more detectors ---
+// --- Additional built-in detectors ---
 
 #[test]
 fn github_tokens() {
@@ -244,6 +259,50 @@ fn private_key_block() {
     // A non-private PEM (certificate) is left alone.
     let cert = "-----BEGIN CERTIFICATE-----\nXYZ\n-----END CERTIFICATE-----";
     assert_eq!(s.clean(cert), cert);
+}
+
+#[test]
+fn cli_redacts_multiline_private_key_from_stdin() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let pem = "before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabc123\n-----END RSA PRIVATE KEY-----\nafter";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    let mut stdin = child.stdin.take().expect("open stdin");
+    stdin.write_all(pem.as_bytes()).expect("write pem");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf8 stdout"),
+        "before\n[REDACTED:PRIVATE_KEY]\nafter"
+    );
+}
+
+#[test]
+fn cli_check_detects_multiline_private_key_from_stdin() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let pem = "-----BEGIN RSA PRIVATE KEY-----\nabc123\n-----END RSA PRIVATE KEY-----\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .arg("--check")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    let mut stdin = child.stdin.take().expect("open stdin");
+    stdin.write_all(pem.as_bytes()).expect("write pem");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
 }
 
 #[test]

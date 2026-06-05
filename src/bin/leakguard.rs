@@ -6,7 +6,7 @@
 //!   leakguard --mask char --only email,ipv4 < input.txt
 //!   cat data.txt | leakguard --check   # exit 1 if anything sensitive is found
 
-use std::io::{self, BufRead, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process::ExitCode;
 
 use leakguard::{Kind, Mask, Redactor};
@@ -18,7 +18,8 @@ USAGE:
     leakguard [OPTIONS] [FILES...]
 
     Reads from the given files (or stdin if none) and writes redacted text to
-    stdout, line by line.
+    stdout. Line endings are preserved; multiline PEM private keys are redacted
+    as a single block.
 
 OPTIONS:
     --mask <MODE>     label (default) | fixed | char | partial | hash
@@ -124,10 +125,9 @@ fn run() -> io::Result<ExitCode> {
         }
     }
 
-    // The Fixed mask requires a 'static str; leak the user string once (CLI lives briefly).
     let mask = match mask_mode.as_str() {
         "label" => Mask::Label,
-        "fixed" => Mask::Fixed(Box::leak(fixed.into_boxed_str())),
+        "fixed" => Mask::fixed(fixed),
         "char" => Mask::Char(fill),
         "partial" => Mask::Partial {
             keep_last: keep,
@@ -142,6 +142,7 @@ fn run() -> io::Result<ExitCode> {
         }
     };
 
+    let detects_private_keys = only.is_empty() || only.contains(&Kind::PrivateKey);
     let redactor = if only.is_empty() {
         Redactor::new()
     } else {
@@ -153,33 +154,41 @@ fn run() -> io::Result<ExitCode> {
     let mut out = BufWriter::new(stdout.lock());
     let mut found_any = false;
 
-    let mut process = |reader: Box<dyn BufRead>| -> io::Result<()> {
-        for line in reader.lines() {
-            let line = line?;
-            if check {
-                if redactor.is_dirty(&line) {
-                    found_any = true;
-                }
-            } else {
-                writeln!(out, "{}", redactor.clean(&line))?;
-            }
-        }
-        Ok(())
-    };
-
     if files.is_empty() {
         let stdin = io::stdin();
-        process(Box::new(stdin.lock()))?;
+        let mut reader = stdin.lock();
+        process_reader(
+            &mut reader,
+            &redactor,
+            check,
+            detects_private_keys,
+            &mut out,
+            &mut found_any,
+        )?;
     } else {
         for f in &files {
             if f == "-" {
                 let stdin = io::stdin();
-                let mut buf = String::new();
-                stdin.lock().read_to_string(&mut buf)?;
-                process(Box::new(io::Cursor::new(buf)))?;
+                let mut reader = stdin.lock();
+                process_reader(
+                    &mut reader,
+                    &redactor,
+                    check,
+                    detects_private_keys,
+                    &mut out,
+                    &mut found_any,
+                )?;
             } else {
                 let file = std::fs::File::open(f)?;
-                process(Box::new(io::BufReader::new(file)))?;
+                let mut reader = BufReader::new(file);
+                process_reader(
+                    &mut reader,
+                    &redactor,
+                    check,
+                    detects_private_keys,
+                    &mut out,
+                    &mut found_any,
+                )?;
             }
         }
     }
@@ -189,6 +198,99 @@ fn run() -> io::Result<ExitCode> {
         return Ok(ExitCode::from(1));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn process_reader<R: BufRead, W: Write>(
+    reader: &mut R,
+    redactor: &Redactor,
+    check: bool,
+    detects_private_keys: bool,
+    out: &mut W,
+    found_any: &mut bool,
+) -> io::Result<()> {
+    let mut pending_private_key = String::new();
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+
+        if pending_private_key.is_empty() && detects_private_keys && starts_private_key_block(&line)
+        {
+            pending_private_key.push_str(&line);
+            if private_key_block_has_end(&pending_private_key) {
+                process_chunk(&pending_private_key, redactor, check, out, found_any)?;
+                pending_private_key.clear();
+            }
+            continue;
+        }
+
+        if !pending_private_key.is_empty() {
+            pending_private_key.push_str(&line);
+            if private_key_block_has_end(&pending_private_key) {
+                process_chunk(&pending_private_key, redactor, check, out, found_any)?;
+                pending_private_key.clear();
+            }
+            continue;
+        }
+
+        process_chunk(&line, redactor, check, out, found_any)?;
+    }
+
+    // If EOF arrives before an END marker, do not drop buffered input. The
+    // normal redactor will still clean any single-line secrets in the fragment.
+    if !pending_private_key.is_empty() {
+        process_chunk(&pending_private_key, redactor, check, out, found_any)?;
+    }
+
+    Ok(())
+}
+
+fn process_chunk<W: Write>(
+    input: &str,
+    redactor: &Redactor,
+    check: bool,
+    out: &mut W,
+    found_any: &mut bool,
+) -> io::Result<()> {
+    if check {
+        if redactor.is_dirty(input) {
+            *found_any = true;
+        }
+    } else {
+        out.write_all(redactor.clean(input).as_bytes())?;
+    }
+    Ok(())
+}
+
+fn starts_private_key_block(input: &str) -> bool {
+    let begin = "-----BEGIN ";
+    let mut from = 0;
+    while let Some(rel) = input[from..].find(begin) {
+        let start = from + rel;
+        let after = start + begin.len();
+        if let Some(header_rel) = input[after..].find("-----") {
+            let header_end = after + header_rel;
+            if input[after..header_end].contains("PRIVATE KEY") {
+                return true;
+            }
+            from = after;
+        } else {
+            return false;
+        }
+    }
+    false
+}
+
+fn private_key_block_has_end(input: &str) -> bool {
+    let end_marker = "-----END ";
+    input
+        .find(end_marker)
+        .and_then(|start| input[start + end_marker.len()..].find("-----"))
+        .is_some()
 }
 
 fn next_val<I: Iterator<Item = String>>(
