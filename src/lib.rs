@@ -23,7 +23,7 @@
 //! use leakguard::{Redactor, Mask};
 //!
 //! // Replace every match with a fixed string.
-//! let s = Redactor::new().mask(Mask::Fixed("***"));
+//! let s = Redactor::new().mask(Mask::fixed("***"));
 //! assert_eq!(s.clean("ip 10.0.0.1"), "ip ***");
 //!
 //! // Keep the last 4 characters of each match.
@@ -58,6 +58,7 @@
 
 extern crate alloc;
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
@@ -76,10 +77,11 @@ pub enum Mask {
     /// Replace with `[REDACTED:<LABEL>]`, e.g. `[REDACTED:EMAIL]`. The default.
     #[default]
     Label,
-    /// Replace with a fixed string literal for every match.
-    Fixed(&'static str),
-    /// Replace with an owned fixed string for every match.
-    FixedOwned(String),
+    /// Replace with a fixed string for every match.
+    ///
+    /// Use `Mask::fixed("...")` for a concise constructor that accepts both
+    /// string literals and owned [`String`] values.
+    Fixed(Cow<'static, str>),
     /// Replace each *character* of the match with `ch`.
     Char(char),
     /// Keep the last `keep_last` characters; replace the rest with `ch`.
@@ -96,11 +98,20 @@ pub enum Mask {
 }
 
 impl Mask {
-    /// Build a fixed-string mask from a runtime string.
+    /// Build a fixed-string mask from either a string literal or an owned string.
     ///
-    /// For string literals, [`Mask::Fixed`] is still the most compact option.
-    pub fn fixed<S: Into<String>>(s: S) -> Self {
-        Self::FixedOwned(s.into())
+    /// ```
+    /// use leakguard::{Mask, Redactor};
+    ///
+    /// let literal = Redactor::new().mask(Mask::fixed("***"));
+    /// let runtime = Redactor::new().mask(Mask::fixed(String::from("<hidden>")));
+    /// # let _ = (literal, runtime);
+    /// ```
+    pub fn fixed<S>(s: S) -> Self
+    where
+        S: Into<Cow<'static, str>>,
+    {
+        Self::Fixed(s.into())
     }
 }
 
@@ -212,8 +223,7 @@ impl Redactor {
     fn render(&self, m: &Match, original: &str) -> String {
         match &self.mask {
             Mask::Label => format!("[REDACTED:{}]", m.kind.label()),
-            Mask::Fixed(s) => String::from(*s),
-            Mask::FixedOwned(s) => s.clone(),
+            Mask::Fixed(s) => String::from(s.as_ref()),
             Mask::Char(c) => core::iter::repeat(*c)
                 .take(original.chars().count())
                 .collect(),

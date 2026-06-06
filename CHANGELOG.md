@@ -6,11 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.1.2] - 2026-06-05
+## [0.2.0] - 2026-06-06
 
 ### Added
-- `Mask::fixed` and `Mask::FixedOwned` for runtime fixed replacement strings without leaking memory.
+- `Mask::fixed` for fixed replacement strings from either string literals or runtime `String` values.
 - Regression coverage for overlong credit-card candidates and multiline PEM redaction through the CLI.
+
+### Changed
+- `Mask::Fixed` now stores `Cow<'static, str>`, giving one cleaner API for both borrowed and owned replacement strings.
+- `Mask::Hash` documentation now clearly describes it as a non-cryptographic correlation fingerprint, not anonymization.
 
 ### Fixed
 - CLI now preserves input line endings instead of rewriting output line-by-line.
@@ -18,8 +22,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CreditCard` detector now rejects candidates with more than 19 digits, including grouped candidates.
 - `HighEntropy` no-std entropy approximation no longer overestimates single-character/low-diversity runs.
 
-### Changed
-- Clarified that `Mask::Hash` is a non-cryptographic correlation fingerprint, not anonymization.
+### Removed
+- Removed the temporary `Mask::FixedOwned` variant; use `Mask::fixed(value)` or `Mask::Fixed(value.into())` instead.
 
 ## [0.1.1] - 2026-06-01
 
@@ -42,7 +46,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `leakguard` CLI for redacting stdin/files, with a `--check` mode for CI guards.
 - `redact_logs` example and an integration test suite.
 
-[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.1.2...HEAD
-[0.1.2]: https://github.com/ptukovar/leakguard/compare/v0.1.1...v0.1.2
+[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ptukovar/leakguard/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ptukovar/leakguard/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ptukovar/leakguard/releases/tag/v0.1.0

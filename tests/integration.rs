@@ -109,7 +109,7 @@ fn url_credentials() {
 
 #[test]
 fn masks() {
-    let s = Redactor::only(&[Kind::IpV4]).mask(Mask::Fixed("***"));
+    let s = Redactor::only(&[Kind::IpV4]).mask(Mask::fixed("***"));
     assert_eq!(s.clean("ip 10.0.0.1"), "ip ***");
 
     let s = Redactor::only(&[Kind::CreditCard]).mask(Mask::Partial {

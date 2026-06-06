@@ -45,7 +45,7 @@ fills that gap with:
 ```toml
 # Library
 [dependencies]
-leakguard = "0.1.2"
+leakguard = "0.2.0"
 ```
 
 ```sh
@@ -63,10 +63,8 @@ use leakguard::{Redactor, Mask};
 // [REDACTED:EMAIL]  (default)
 Redactor::new();
 
-// fixed string literal
-Redactor::new().mask(Mask::Fixed("***"));
-
-// fixed runtime string
+// fixed string, from either a literal or a runtime String
+Redactor::new().mask(Mask::fixed("***"));
 Redactor::new().mask(Mask::fixed(String::from("***")));
 
 // keep the last 4 chars: 4111 1111 1111 1111 -> ***************1111
