@@ -45,7 +45,7 @@ fills that gap with:
 ```toml
 # Library
 [dependencies]
-leakguard = "0.2.0"
+leakguard = "0.3.0"
 ```
 
 ```sh
@@ -128,8 +128,14 @@ leakguard --mask partial --keep 4 access.log > clean.log
 # Only redact emails and IPv4, masking with '#'
 leakguard --only email,ipv4 --mask char --char '#' < input.txt
 
-# CI guard: fail the build if a file contains secrets
-leakguard --check secrets-scan.txt || echo "found sensitive data!"
+# Redact everything except phone numbers
+leakguard --without phone app.log
+
+# Print supported detector names
+leakguard --list-kinds
+
+# CI guard: fail the build if a file contains secrets; print kinds/offsets to stderr
+leakguard --check --verbose secrets-scan.txt || echo "found sensitive data!"
 ```
 
 ## Detectors

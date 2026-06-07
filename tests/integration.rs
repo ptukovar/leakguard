@@ -306,6 +306,123 @@ fn cli_check_detects_multiline_private_key_from_stdin() {
 }
 
 #[test]
+fn cli_lists_supported_kinds() {
+    use std::process::Command;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .arg("--list-kinds")
+        .output()
+        .expect("run leakguard --list-kinds");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.lines().any(|line| line == "email"));
+    assert!(stdout.lines().any(|line| line == "private_key"));
+    assert!(stdout.lines().any(|line| line == "iban"));
+}
+
+#[test]
+fn cli_without_excludes_detector_from_stdin() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .args(["--without", "email"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    let mut stdin = child.stdin.take().expect("open stdin");
+    stdin
+        .write_all(b"alice@example.com from 10.0.0.1")
+        .expect("write input");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf8 stdout"),
+        "alice@example.com from [REDACTED:IPV4]"
+    );
+}
+
+#[test]
+fn cli_only_and_without_can_be_combined() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .args(["--only", "email,ipv4", "--without", "ipv4"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    let mut stdin = child.stdin.take().expect("open stdin");
+    stdin
+        .write_all(b"alice@example.com from 10.0.0.1")
+        .expect("write input");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf8 stdout"),
+        "[REDACTED:EMAIL] from 10.0.0.1"
+    );
+}
+
+#[test]
+fn cli_check_verbose_reports_kind_without_secret_value() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .args(["--check", "--verbose"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    let mut stdin = child.stdin.take().expect("open stdin");
+    stdin
+        .write_all(b"contact alice@example.com")
+        .expect("write input");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
+    assert!(stderr.contains("EMAIL"));
+    assert!(stderr.contains("<stdin>"));
+    assert!(!stderr.contains("alice@example.com"));
+}
+
+#[test]
+fn cli_redacts_file_input_and_preserves_no_trailing_newline() {
+    use std::fs;
+    use std::process::Command;
+
+    let path = std::env::temp_dir().join(format!(
+        "leakguard-cli-file-{}-{}.log",
+        std::process::id(),
+        line!()
+    ));
+    fs::write(&path, "ip 10.0.0.1").expect("write temp input");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .arg(&path)
+        .output()
+        .expect("run leakguard CLI with file");
+    let _ = fs::remove_file(&path);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf8 stdout"),
+        "ip [REDACTED:IPV4]"
+    );
+}
+
+#[test]
 fn iban_checksum() {
     let s = Redactor::only(&[Kind::Iban]);
     // Valid German IBAN (well-known test value).

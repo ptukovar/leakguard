@@ -4,7 +4,8 @@
 //!   tail -f app.log | leakguard
 //!   leakguard access.log > clean.log
 //!   leakguard --mask char --only email,ipv4 < input.txt
-//!   cat data.txt | leakguard --check   # exit 1 if anything sensitive is found
+//!   leakguard --without phone app.log
+//!   cat data.txt | leakguard --check --verbose   # exit 1 and report kinds found
 
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process::ExitCode;
@@ -27,7 +28,10 @@ OPTIONS:
     --char <C>        fill char for char/partial masks (default: *)
     --keep <N>        characters to keep for --mask partial (default: 4)
     --only <LIST>     comma-separated kinds to detect (e.g. email,ipv4,jwt)
+    --without <LIST>  comma-separated kinds to skip from the selected detectors
     --check           don't print; exit 1 if any sensitive data is found
+    -v, --verbose     with --check, print matched kinds and offsets to stderr
+    --list-kinds      print supported kind names, then exit
     -h, --help        print this help
     -V, --version     print version
 
@@ -36,6 +40,26 @@ KINDS:
     url_credentials, phone, github_token, slack_token, stripe_key,
     google_api_key, openai_key, private_key, iban
 ";
+
+const KIND_NAMES: &[&str] = &[
+    "email",
+    "credit_card",
+    "ipv4",
+    "ipv6",
+    "jwt",
+    "us_ssn",
+    "mac",
+    "aws_access_key",
+    "url_credentials",
+    "phone",
+    "github_token",
+    "slack_token",
+    "stripe_key",
+    "google_api_key",
+    "openai_key",
+    "private_key",
+    "iban",
+];
 
 fn parse_kind(s: &str) -> Option<Kind> {
     Some(match s.trim().to_ascii_lowercase().as_str() {
@@ -60,6 +84,32 @@ fn parse_kind(s: &str) -> Option<Kind> {
     })
 }
 
+fn parse_kind_list(value: &str, flag: &str) -> io::Result<Vec<Kind>> {
+    let mut kinds = Vec::new();
+    for part in value.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match parse_kind(part) {
+            Some(k) => kinds.push(k),
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown kind for {flag}: {part}"),
+                ))
+            }
+        }
+    }
+    Ok(kinds)
+}
+
+fn print_kinds() {
+    for kind in KIND_NAMES {
+        println!("{kind}");
+    }
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
@@ -78,7 +128,9 @@ fn run() -> io::Result<ExitCode> {
     let mut fill = '*';
     let mut keep = 4usize;
     let mut only: Vec<Kind> = Vec::new();
+    let mut without: Vec<Kind> = Vec::new();
     let mut check = false;
+    let mut verbose = false;
     let mut files: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -91,6 +143,10 @@ fn run() -> io::Result<ExitCode> {
                 println!("leakguard {}", env!("CARGO_PKG_VERSION"));
                 return Ok(ExitCode::SUCCESS);
             }
+            "--list-kinds" => {
+                print_kinds();
+                return Ok(ExitCode::SUCCESS);
+            }
             "--mask" => mask_mode = next_val(&mut args, "--mask")?,
             "--fixed" => fixed = next_val(&mut args, "--fixed")?,
             "--char" => {
@@ -101,20 +157,13 @@ fn run() -> io::Result<ExitCode> {
                     io::Error::new(io::ErrorKind::InvalidInput, "--keep needs a number")
                 })?;
             }
-            "--only" => {
-                for part in next_val(&mut args, "--only")?.split(',') {
-                    match parse_kind(part) {
-                        Some(k) => only.push(k),
-                        None => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!("unknown kind: {part}"),
-                            ))
-                        }
-                    }
-                }
-            }
+            "--only" => only.extend(parse_kind_list(&next_val(&mut args, "--only")?, "--only")?),
+            "--without" | "--exclude" => without.extend(parse_kind_list(
+                &next_val(&mut args, "--without")?,
+                "--without",
+            )?),
             "--check" => check = true,
+            "-v" | "--verbose" => verbose = true,
             other if other.starts_with('-') && other != "-" => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -142,13 +191,17 @@ fn run() -> io::Result<ExitCode> {
         }
     };
 
-    let detects_private_keys = only.is_empty() || only.contains(&Kind::PrivateKey);
-    let redactor = if only.is_empty() {
+    let detects_private_keys = (only.is_empty() || only.contains(&Kind::PrivateKey))
+        && !without.contains(&Kind::PrivateKey);
+    let mut redactor = if only.is_empty() {
         Redactor::new()
     } else {
         Redactor::only(&only)
+    };
+    for kind in &without {
+        redactor = redactor.without(kind);
     }
-    .mask(mask);
+    let redactor = redactor.mask(mask);
 
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
@@ -157,38 +210,44 @@ fn run() -> io::Result<ExitCode> {
     if files.is_empty() {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
-        process_reader(
-            &mut reader,
+        let mut ctx = ProcessCtx::new(
             &redactor,
             check,
             detects_private_keys,
+            verbose,
+            "<stdin>",
             &mut out,
             &mut found_any,
-        )?;
+        );
+        process_reader(&mut reader, &mut ctx)?;
     } else {
         for f in &files {
             if f == "-" {
                 let stdin = io::stdin();
                 let mut reader = stdin.lock();
-                process_reader(
-                    &mut reader,
+                let mut ctx = ProcessCtx::new(
                     &redactor,
                     check,
                     detects_private_keys,
+                    verbose,
+                    "<stdin>",
                     &mut out,
                     &mut found_any,
-                )?;
+                );
+                process_reader(&mut reader, &mut ctx)?;
             } else {
                 let file = std::fs::File::open(f)?;
                 let mut reader = BufReader::new(file);
-                process_reader(
-                    &mut reader,
+                let mut ctx = ProcessCtx::new(
                     &redactor,
                     check,
                     detects_private_keys,
+                    verbose,
+                    f,
                     &mut out,
                     &mut found_any,
-                )?;
+                );
+                process_reader(&mut reader, &mut ctx)?;
             }
         }
     }
@@ -200,13 +259,41 @@ fn run() -> io::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn process_reader<R: BufRead, W: Write>(
-    reader: &mut R,
-    redactor: &Redactor,
+struct ProcessCtx<'a, W: Write> {
+    redactor: &'a Redactor,
     check: bool,
     detects_private_keys: bool,
-    out: &mut W,
-    found_any: &mut bool,
+    verbose: bool,
+    source: &'a str,
+    out: &'a mut W,
+    found_any: &'a mut bool,
+}
+
+impl<'a, W: Write> ProcessCtx<'a, W> {
+    fn new(
+        redactor: &'a Redactor,
+        check: bool,
+        detects_private_keys: bool,
+        verbose: bool,
+        source: &'a str,
+        out: &'a mut W,
+        found_any: &'a mut bool,
+    ) -> Self {
+        Self {
+            redactor,
+            check,
+            detects_private_keys,
+            verbose,
+            source,
+            out,
+            found_any,
+        }
+    }
+}
+
+fn process_reader<R: BufRead, W: Write>(
+    reader: &mut R,
+    ctx: &mut ProcessCtx<'_, W>,
 ) -> io::Result<()> {
     let mut pending_private_key = String::new();
     let mut line = String::new();
@@ -218,11 +305,13 @@ fn process_reader<R: BufRead, W: Write>(
             break;
         }
 
-        if pending_private_key.is_empty() && detects_private_keys && starts_private_key_block(&line)
+        if pending_private_key.is_empty()
+            && ctx.detects_private_keys
+            && starts_private_key_block(&line)
         {
             pending_private_key.push_str(&line);
             if private_key_block_has_end(&pending_private_key) {
-                process_chunk(&pending_private_key, redactor, check, out, found_any)?;
+                process_chunk(&pending_private_key, ctx)?;
                 pending_private_key.clear();
             }
             continue;
@@ -231,37 +320,40 @@ fn process_reader<R: BufRead, W: Write>(
         if !pending_private_key.is_empty() {
             pending_private_key.push_str(&line);
             if private_key_block_has_end(&pending_private_key) {
-                process_chunk(&pending_private_key, redactor, check, out, found_any)?;
+                process_chunk(&pending_private_key, ctx)?;
                 pending_private_key.clear();
             }
             continue;
         }
 
-        process_chunk(&line, redactor, check, out, found_any)?;
+        process_chunk(&line, ctx)?;
     }
 
     // If EOF arrives before an END marker, do not drop buffered input. The
     // normal redactor will still clean any single-line secrets in the fragment.
     if !pending_private_key.is_empty() {
-        process_chunk(&pending_private_key, redactor, check, out, found_any)?;
+        process_chunk(&pending_private_key, ctx)?;
     }
 
     Ok(())
 }
 
-fn process_chunk<W: Write>(
-    input: &str,
-    redactor: &Redactor,
-    check: bool,
-    out: &mut W,
-    found_any: &mut bool,
-) -> io::Result<()> {
-    if check {
-        if redactor.is_dirty(input) {
-            *found_any = true;
+fn process_chunk<W: Write>(input: &str, ctx: &mut ProcessCtx<'_, W>) -> io::Result<()> {
+    if ctx.check {
+        let matches = ctx.redactor.find(input);
+        if !matches.is_empty() {
+            *ctx.found_any = true;
+            if ctx.verbose {
+                for m in matches {
+                    eprintln!(
+                        "leakguard: {}: found {} at {}..{}",
+                        ctx.source, m.kind, m.start, m.end
+                    );
+                }
+            }
         }
     } else {
-        out.write_all(redactor.clean(input).as_bytes())?;
+        ctx.out.write_all(ctx.redactor.clean(input).as_bytes())?;
     }
     Ok(())
 }
