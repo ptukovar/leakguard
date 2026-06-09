@@ -433,23 +433,20 @@ impl Detector for UsSsn {
                 && win[7..11].iter().all(|c| is_ascii_digit(*c));
             let bounded_left = i == 0 || !is_ascii_digit(b[i - 1]);
             let bounded_right = i + 11 == n || !is_ascii_digit(b[i + 11]);
-            // Area number 000, 666, 900-999 are never valid.
-            let area = &input[i..i + 3];
-            let invalid_area = area == "000" || area == "666" || b[i] == b'9';
-            let group = &input[i + 4..i + 6];
-            let serial = &input[i + 7..i + 11];
-            if shape
-                && bounded_left
-                && bounded_right
-                && !invalid_area
-                && group != "00"
-                && serial != "0000"
-            {
-                out.push(Match::new(Kind::UsSsn, i, i + 11));
-                i += 11;
-            } else {
-                i += 1;
+            if shape && bounded_left && bounded_right {
+                // Area number 000, 666, 900-999 are never valid. Use byte
+                // slices here so scanning arbitrary UTF-8 never slices through
+                // a multibyte character.
+                let invalid_area = &b[i..i + 3] == b"000" || &b[i..i + 3] == b"666" || b[i] == b'9';
+                let invalid_group = &b[i + 4..i + 6] == b"00";
+                let invalid_serial = &b[i + 7..i + 11] == b"0000";
+                if !invalid_area && !invalid_group && !invalid_serial {
+                    out.push(Match::new(Kind::UsSsn, i, i + 11));
+                    i += 11;
+                    continue;
+                }
             }
+            i += 1;
         }
     }
 }

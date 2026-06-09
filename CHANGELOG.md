@@ -6,7 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-06-06
+## [0.4.0] - 2026-06-09
+
+### Added
+- Fuzz-style invariant tests for generated and adversarial inputs, checking UTF-8-safe match boundaries, sorted non-overlapping spans, and mask rendering.
+- Dependency-free benchmark harness in `examples/bench.rs` using `std::time::Instant`.
+- README security model and limitations section clarifying best-effort redaction, false positives/negatives, and `Mask::Hash` limitations.
+- `SECURITY.md` with supported-version and private reporting guidance.
+
+## [0.3.0] - 2026-06-07
 
 ### Added
 - CLI `--list-kinds` option to print supported detector kind names.
@@ -54,7 +62,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `leakguard` CLI for redacting stdin/files, with a `--check` mode for CI guards.
 - `redact_logs` example and an integration test suite.
 
-[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ptukovar/leakguard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ptukovar/leakguard/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ptukovar/leakguard/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ptukovar/leakguard/releases/tag/v0.1.1

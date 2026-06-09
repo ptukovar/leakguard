@@ -45,7 +45,7 @@ fills that gap with:
 ```toml
 # Library
 [dependencies]
-leakguard = "0.3.0"
+leakguard = "0.4.0"
 ```
 
 ```sh
@@ -171,20 +171,52 @@ leakguard --check --verbose secrets-scan.txt || echo "found sensitive data!"
 > // or tune it: HighEntropy::new(/* min_len */ 24, /* min_entropy bits */ 4.0)
 > ```
 
+
+## Security model and limitations
+
+leakguard is a **best-effort redaction tool** intended to reduce accidental
+leakage of secrets and personally identifiable information in logs, text, and CI
+workflows. It is not a substitute for secret management, access control, code
+review, or incident response.
+
+Important limitations:
+
+- Detectors are intentionally conservative in several places to reduce false
+  positives, so some real secrets or PII formats may not be detected.
+- Some detectors can still produce false positives, especially phone numbers and
+  opt-in high-entropy scanning.
+- Redaction should happen as early as possible, before sensitive data leaves your
+  process or enters persistent logs.
+- `Mask::Hash` is a stable, non-cryptographic fingerprint for correlation only.
+  It is not anonymization and does not protect low-entropy values from guessing
+  or dictionary attacks.
+- Keep raw logs and unredacted inputs protected. Treat leakguard as a defense in
+  depth layer, not as the only control protecting sensitive data.
+
+If you believe you found a vulnerability or a serious redaction bypass, please
+report it privately through GitHub's vulnerability reporting flow when available,
+or contact the maintainer through GitHub before opening a public issue.
+
 ## Performance
 
 leakguard uses hand-written, single-pass byte scanners — no regex backtracking.
-Detection is roughly linear in input size. Run the bundled example:
+Detection is roughly linear in input size. Run the bundled example and benchmark
+harness:
 
 ```sh
 cargo run --example redact_logs
+cargo run --release --example bench
 ```
+
+The benchmark harness is intentionally dependency-free and uses
+`std::time::Instant`, so run it several times on an otherwise idle machine when
+comparing changes.
 
 ## `no_std`
 
 ```toml
 [dependencies]
-leakguard = { version = "0.1", default-features = false }
+leakguard = { version = "0.4", default-features = false }
 ```
 
 This drops the CLI and `std`-only conveniences but keeps the full detection and
