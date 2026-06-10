@@ -45,7 +45,7 @@ fills that gap with:
 ```toml
 # Library
 [dependencies]
-leakguard = "0.4.0"
+leakguard = "0.5.0"
 ```
 
 ```sh
@@ -216,11 +216,28 @@ comparing changes.
 
 ```toml
 [dependencies]
-leakguard = { version = "0.4", default-features = false }
+leakguard = { version = "0.5", default-features = false }
 ```
 
 This drops the CLI and `std`-only conveniences but keeps the full detection and
 redaction API (it needs `alloc`).
+
+
+## Reporting detector issues
+
+False positives and false negatives are extremely useful for improving leakguard.
+Please report them with **fake or synthetic examples only**. Do not paste real
+secrets, tokens, private keys, customer data, or production logs into GitHub
+issues, pull requests, or discussions.
+
+Helpful reports usually include:
+
+- leakguard version
+- detector kind, if known
+- fake input text
+- actual output
+- expected output
+- whether the issue affects the library, CLI, or both
 
 ## Contributing
 

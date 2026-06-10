@@ -1,0 +1,42 @@
+name: False positive
+description: Report text that leakguard redacts but should probably leave alone
+title: "false positive: "
+labels: [false-positive]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please use fake or synthetic examples only. Do not paste real logs,
+        customer data, secrets, tokens, or private keys.
+  - type: input
+    id: version
+    attributes:
+      label: leakguard version
+      placeholder: "0.5.0"
+    validations:
+      required: true
+  - type: input
+    id: kind
+    attributes:
+      label: Detector kind, if known
+      placeholder: "phone, email, ipv4, credit_card, ..."
+  - type: textarea
+    id: input
+    attributes:
+      label: Fake input that was incorrectly redacted
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Actual redacted output
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why should this not be redacted?
+    validations:
+      required: true

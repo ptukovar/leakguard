@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a crash, incorrect behavior, or CLI/library bug
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please do not include real secrets, tokens,
+        private keys, customer data, or production logs.
+  - type: input
+    id: version
+    attributes:
+      label: leakguard version
+      placeholder: "0.5.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Library
+        - CLI
+        - Documentation
+        - CI / release
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction using fake data
+      description: Use fake/test values only.
+      render: text
+    validations:
+      required: true

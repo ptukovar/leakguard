@@ -1,0 +1,43 @@
+name: False negative
+description: Report fake sensitive data that leakguard should redact but misses
+title: "false negative: "
+labels: [false-negative]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please use fake or synthetic examples only. Do not paste real secrets,
+        tokens, private keys, customer data, or production logs.
+  - type: input
+    id: version
+    attributes:
+      label: leakguard version
+      placeholder: "0.5.0"
+    validations:
+      required: true
+  - type: input
+    id: kind
+    attributes:
+      label: Expected detector kind
+      placeholder: "github_token, private_key, iban, ..."
+    validations:
+      required: true
+  - type: textarea
+    id: input
+    attributes:
+      label: Fake input that should be redacted
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Actual output
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected output
+      render: text

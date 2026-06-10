@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-10
+
+### Added
+- CI matrix covering Linux, macOS, Windows, and the Rust 1.70.0 MSRV.
+- Release checklist documentation in `RELEASE.md`.
+- GitHub issue templates for bug reports, false positives, false negatives, and feature requests.
+- Pull request template with test, detector, formatting, and no-std checklist items.
+- README guidance for safely reporting detector false positives and false negatives.
+
 ## [0.4.0] - 2026-06-09
 
 ### Added
@@ -62,7 +71,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `leakguard` CLI for redacting stdin/files, with a `--check` mode for CI guards.
 - `redact_logs` example and an integration test suite.
 
-[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ptukovar/leakguard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ptukovar/leakguard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ptukovar/leakguard/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ptukovar/leakguard/compare/v0.1.1...v0.2.0

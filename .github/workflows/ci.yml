@@ -11,31 +11,58 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.rust }})
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        rust: [stable, "1.70.0"]
+        include:
+          - name: Linux stable
+            os: ubuntu-latest
+            rust: stable
+            full: true
+          - name: macOS stable
+            os: macos-latest
+            rust: stable
+            full: false
+          - name: Windows stable
+            os: windows-latest
+            rust: stable
+            full: false
+          - name: MSRV 1.70.0
+            os: ubuntu-latest
+            rust: "1.70.0"
+            full: false
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
           components: clippy, rustfmt
+
       - name: Format
+        if: matrix.full
         run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+
       - name: Test
         run: cargo test --all-features
-      - name: Build (no_std)
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build no_std library
         run: cargo build --no-default-features
 
-  msrv-docs:
-    name: Docs build
+      - name: Publish dry run
+        if: matrix.full
+        run: cargo publish --dry-run
+
+  docs:
+    name: Docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Doc
+      - name: Build documentation
         run: cargo doc --no-deps
