@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format is based on
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.6.1] - 2026-07-20
+- Syntax fix
 
 ## [0.6.0] - 2026-07-20
 
