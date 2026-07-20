@@ -384,19 +384,17 @@ fn process_chunk<W: Write>(input: &str, ctx: &mut ProcessCtx<'_, W>) -> io::Resu
             json.push_str("\n  ]\n}\n");
             ctx.out.write_all(json.as_bytes())?;
         }
-    } else {
-        if ctx.check {
-            if !matches.is_empty() && ctx.verbose {
-                for m in matches {
-                    eprintln!(
-                        "leakguard: {}: found {} at {}..{}",
-                        ctx.source, m.kind, m.start, m.end
-                    );
-                }
+    } else if ctx.check {
+        if !matches.is_empty() && ctx.verbose {
+            for m in matches {
+                eprintln!(
+                    "leakguard: {}: found {} at {}..{}",
+                    ctx.source, m.kind, m.start, m.end
+                );
             }
-        } else {
-            ctx.out.write_all(ctx.redactor.clean(input).as_bytes())?;
         }
+    } else {
+        ctx.out.write_all(ctx.redactor.clean(input).as_bytes())?;
     }
     Ok(())
 }
