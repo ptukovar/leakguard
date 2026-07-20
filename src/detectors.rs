@@ -1082,3 +1082,128 @@ impl Detector for HighEntropy {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Azure Connection String
+// ---------------------------------------------------------------------------
+
+/// Detects Azure storage connection strings (`DefaultEndpointsProtocol=...` or `AccountKey=...`).
+pub struct AzureConnectionString;
+
+impl Detector for AzureConnectionString {
+    fn kind(&self) -> Kind {
+        Kind::AzureConnectionString
+    }
+
+    fn detect(&self, input: &str, out: &mut Vec<Match>) {
+        let b = input.as_bytes();
+        for prefix in [&b"DefaultEndpointsProtocol="[..], &b"AccountKey="[..]] {
+            let plen = prefix.len();
+            let mut i = 0;
+            while i + plen <= b.len() {
+                if &b[i..i + plen] == prefix && bounded_left(b, i) {
+                    let mut start = i;
+                    while start > 0
+                        && b[start - 1] != b';'
+                        && b[start - 1] != b'"'
+                        && b[start - 1] != b'\''
+                        && b[start - 1] != b'\n'
+                        && b[start - 1] != b' '
+                    {
+                        start -= 1;
+                    }
+                    let mut end = i + plen;
+                    while end < b.len() && b[end] != b'\n' && b[end] != b'"' && b[end] != b'\'' {
+                        end += 1;
+                    }
+                    if end > start + 20 {
+                        out.push(Match::new(Kind::AzureConnectionString, start, end));
+                        i = end;
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Telegram Bot Token
+// ---------------------------------------------------------------------------
+
+/// Detects Telegram bot API tokens (`<bot_id>:<token>`).
+pub struct TelegramToken;
+
+impl Detector for TelegramToken {
+    fn kind(&self) -> Kind {
+        Kind::TelegramToken
+    }
+
+    fn detect(&self, input: &str, out: &mut Vec<Match>) {
+        let b = input.as_bytes();
+        let mut i = 0;
+        while i + 40 <= b.len() {
+            if b[i].is_ascii_digit() && bounded_left(b, i) {
+                let mut j = i;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let digits_len = j - i;
+                if (8..=11).contains(&digits_len) && j < b.len() && b[j] == b':' {
+                    let token_start = j + 1;
+                    let token_end = run(b, token_start, is_token_char);
+                    let token_len = token_end - token_start;
+                    if (30..=50).contains(&token_len) && bounded_right(b, token_end) {
+                        out.push(Match::new(Kind::TelegramToken, i, token_end));
+                        i = token_end;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Discord Token
+// ---------------------------------------------------------------------------
+
+/// Detects Discord bot or user tokens.
+pub struct DiscordToken;
+
+impl Detector for DiscordToken {
+    fn kind(&self) -> Kind {
+        Kind::DiscordToken
+    }
+
+    fn detect(&self, input: &str, out: &mut Vec<Match>) {
+        scan_prefixed(input, "mfa.", 84, 84, Kind::DiscordToken, out);
+
+        let b = input.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if (b[i] == b'M' || b[i] == b'N' || b[i] == b'O') && bounded_left(b, i) {
+                let seg1 = run(b, i, is_token_char);
+                let seg1_len = seg1 - i;
+                if (23..=28).contains(&seg1_len) && seg1 < b.len() && b[seg1] == b'.' {
+                    let seg2_start = seg1 + 1;
+                    let seg2 = run(b, seg2_start, is_token_char);
+                    let seg2_len = seg2 - seg2_start;
+                    if seg2_len == 6 && seg2 < b.len() && b[seg2] == b'.' {
+                        let seg3_start = seg2 + 1;
+                        let seg3 = run(b, seg3_start, is_token_char);
+                        let seg3_len = seg3 - seg3_start;
+                        if (27..=45).contains(&seg3_len) && bounded_right(b, seg3) {
+                            out.push(Match::new(Kind::DiscordToken, i, seg3));
+                            i = seg3;
+                            continue;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+}

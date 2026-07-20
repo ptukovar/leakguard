@@ -43,6 +43,12 @@ pub enum Kind {
     PrivateKey,
     /// An IBAN bank account number (passes the ISO 7064 mod-97 checksum).
     Iban,
+    /// An Azure storage connection string.
+    AzureConnectionString,
+    /// A Telegram bot API token.
+    TelegramToken,
+    /// A Discord bot or user token.
+    DiscordToken,
     /// A generic high-entropy secret detected by [`crate::detectors::HighEntropy`].
     GenericSecret,
     /// A high-entropy token / generic secret detected by a custom rule.
@@ -70,6 +76,9 @@ impl Kind {
             Kind::OpenAiKey => "OPENAI_KEY",
             Kind::PrivateKey => "PRIVATE_KEY",
             Kind::Iban => "IBAN",
+            Kind::AzureConnectionString => "AZURE_CONNECTION_STRING",
+            Kind::TelegramToken => "TELEGRAM_TOKEN",
+            Kind::DiscordToken => "DISCORD_TOKEN",
             Kind::GenericSecret => "GENERIC_SECRET",
             Kind::Custom(name) => name,
         }

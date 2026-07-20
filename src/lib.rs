@@ -198,6 +198,14 @@ impl Redactor {
         })
     }
 
+    /// Return a vector of cleaned copies for an iterator of input strings.
+    pub fn clean_iter<'a, I>(&self, inputs: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        inputs.into_iter().map(|s| self.clean(s)).collect()
+    }
+
     /// Return a cleaned copy of `input` with every match rewritten per the
     /// configured [`Mask`].
     pub fn clean(&self, input: &str) -> String {
@@ -249,6 +257,9 @@ fn default_detectors() -> Vec<Box<dyn Detector>> {
     alloc::vec![
         // High-specificity secrets first so they win on any overlap.
         Box::new(PrivateKey) as Box<dyn Detector>,
+        Box::new(AzureConnectionString),
+        Box::new(TelegramToken),
+        Box::new(DiscordToken),
         Box::new(Jwt),
         Box::new(GitHubToken),
         Box::new(SlackToken),

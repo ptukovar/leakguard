@@ -477,3 +477,60 @@ fn defaults_cover_new_detectors() {
     assert!(cleaned.contains("[REDACTED:GITHUB_TOKEN]"));
     assert!(cleaned.contains("[REDACTED:IBAN]"));
 }
+
+#[test]
+fn azure_connection_string() {
+    let s = Redactor::only(&[Kind::AzureConnectionString]);
+    let conn = "DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=abcdef123456==;";
+    assert_eq!(s.clean(conn), "[REDACTED:AZURE_CONNECTION_STRING]");
+}
+
+#[test]
+fn telegram_token() {
+    let s = Redactor::only(&[Kind::TelegramToken]);
+    let token = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ1234567890";
+    assert_eq!(
+        s.clean(&format!("bot {token}")),
+        "bot [REDACTED:TELEGRAM_TOKEN]"
+    );
+}
+
+#[test]
+fn discord_token() {
+    let s = Redactor::only(&[Kind::DiscordToken]);
+    let mfa = format!("mfa.{}", "a".repeat(84));
+    assert_eq!(s.clean(&mfa), "[REDACTED:DISCORD_TOKEN]");
+}
+
+#[test]
+fn clean_iter_helper() {
+    let s = Redactor::new();
+    let inputs = ["alice@example.com", "10.0.0.1"];
+    let cleaned = s.clean_iter(inputs);
+    assert_eq!(cleaned[0], "[REDACTED:EMAIL]");
+    assert_eq!(cleaned[1], "[REDACTED:IPV4]");
+}
+
+#[test]
+fn cli_json_output() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .args(["--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    let mut stdin = child.stdin.take().expect("open stdin");
+    stdin
+        .write_all(b"contact alice@example.com")
+        .expect("write input");
+    drop(stdin);
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("EMAIL"));
+    assert!(stdout.contains("matches"));
+}

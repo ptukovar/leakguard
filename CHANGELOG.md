@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-20
+
+### Added
+- New built-in detectors:
+  - Azure storage connection strings (`AZURE_CONNECTION_STRING`).
+  - Telegram bot API tokens (`TELEGRAM_TOKEN`).
+  - Discord bot, user, and MFA tokens (`DISCORD_TOKEN`).
+- CLI `--format json` (and `--json` shortcut) option to output structured findings in JSON format.
+- `Redactor::clean_iter` library helper method for batch cleaning iterators of strings.
+- Integration tests covering new detectors, batch cleaning, and JSON CLI output.
+
 ## [0.5.0] - 2026-06-10
 
 ### Added
@@ -71,7 +82,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `leakguard` CLI for redacting stdin/files, with a `--check` mode for CI guards.
 - `redact_logs` example and an integration test suite.
 
-[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ptukovar/leakguard/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ptukovar/leakguard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ptukovar/leakguard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/ptukovar/leakguard/compare/v0.2.0...v0.3.0

@@ -29,6 +29,8 @@ OPTIONS:
     --keep <N>        characters to keep for --mask partial (default: 4)
     --only <LIST>     comma-separated kinds to detect (e.g. email,ipv4,jwt)
     --without <LIST>  comma-separated kinds to skip from the selected detectors
+    --format <FMT>    output format: text (default) or json
+    --json            shortcut for --format json
     --check           don't print; exit 1 if any sensitive data is found
     -v, --verbose     with --check, print matched kinds and offsets to stderr
     --list-kinds      print supported kind names, then exit
@@ -38,7 +40,8 @@ OPTIONS:
 KINDS:
     email, credit_card, ipv4, ipv6, jwt, us_ssn, mac, aws_access_key,
     url_credentials, phone, github_token, slack_token, stripe_key,
-    google_api_key, openai_key, private_key, iban
+    google_api_key, openai_key, private_key, iban, azure_connection_string,
+    telegram_token, discord_token
 ";
 
 const KIND_NAMES: &[&str] = &[
@@ -59,6 +62,9 @@ const KIND_NAMES: &[&str] = &[
     "openai_key",
     "private_key",
     "iban",
+    "azure_connection_string",
+    "telegram_token",
+    "discord_token",
 ];
 
 fn parse_kind(s: &str) -> Option<Kind> {
@@ -80,6 +86,9 @@ fn parse_kind(s: &str) -> Option<Kind> {
         "openai_key" | "openai" => Kind::OpenAiKey,
         "private_key" | "pem" => Kind::PrivateKey,
         "iban" => Kind::Iban,
+        "azure_connection_string" | "azure" => Kind::AzureConnectionString,
+        "telegram_token" | "telegram" | "tg" => Kind::TelegramToken,
+        "discord_token" | "discord" => Kind::DiscordToken,
         _ => return None,
     })
 }
@@ -127,6 +136,7 @@ fn run() -> io::Result<ExitCode> {
     let mut fixed = String::from("[REDACTED]");
     let mut fill = '*';
     let mut keep = 4usize;
+    let mut format = String::from("text");
     let mut only: Vec<Kind> = Vec::new();
     let mut without: Vec<Kind> = Vec::new();
     let mut check = false;
@@ -157,6 +167,8 @@ fn run() -> io::Result<ExitCode> {
                     io::Error::new(io::ErrorKind::InvalidInput, "--keep needs a number")
                 })?;
             }
+            "--format" => format = next_val(&mut args, "--format")?,
+            "--json" => format = String::from("json"),
             "--only" => only.extend(parse_kind_list(&next_val(&mut args, "--only")?, "--only")?),
             "--without" | "--exclude" => without.extend(parse_kind_list(
                 &next_val(&mut args, "--without")?,
@@ -215,6 +227,7 @@ fn run() -> io::Result<ExitCode> {
             check,
             detects_private_keys,
             verbose,
+            &format,
             "<stdin>",
             &mut out,
             &mut found_any,
@@ -230,6 +243,7 @@ fn run() -> io::Result<ExitCode> {
                     check,
                     detects_private_keys,
                     verbose,
+                    &format,
                     "<stdin>",
                     &mut out,
                     &mut found_any,
@@ -243,6 +257,7 @@ fn run() -> io::Result<ExitCode> {
                     check,
                     detects_private_keys,
                     verbose,
+                    &format,
                     f,
                     &mut out,
                     &mut found_any,
@@ -264,17 +279,20 @@ struct ProcessCtx<'a, W: Write> {
     check: bool,
     detects_private_keys: bool,
     verbose: bool,
+    format: &'a str,
     source: &'a str,
     out: &'a mut W,
     found_any: &'a mut bool,
 }
 
 impl<'a, W: Write> ProcessCtx<'a, W> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         redactor: &'a Redactor,
         check: bool,
         detects_private_keys: bool,
         verbose: bool,
+        format: &'a str,
         source: &'a str,
         out: &'a mut W,
         found_any: &'a mut bool,
@@ -284,6 +302,7 @@ impl<'a, W: Write> ProcessCtx<'a, W> {
             check,
             detects_private_keys,
             verbose,
+            format,
             source,
             out,
             found_any,
@@ -339,11 +358,35 @@ fn process_reader<R: BufRead, W: Write>(
 }
 
 fn process_chunk<W: Write>(input: &str, ctx: &mut ProcessCtx<'_, W>) -> io::Result<()> {
-    if ctx.check {
-        let matches = ctx.redactor.find(input);
-        if !matches.is_empty() {
-            *ctx.found_any = true;
-            if ctx.verbose {
+    let matches = ctx.redactor.find(input);
+    if !matches.is_empty() {
+        *ctx.found_any = true;
+    }
+    if ctx.format == "json" {
+        if !matches.is_empty() || !ctx.check {
+            let mut json = String::new();
+            json.push_str("{\n  \"source\": ");
+            json.push_str(&json_escape(ctx.source));
+            json.push_str(",\n  \"matches\": [\n");
+            for (idx, m) in matches.iter().enumerate() {
+                if idx > 0 {
+                    json.push_str(",\n");
+                }
+                let matched_text = m.text(input);
+                json.push_str(&format!(
+                    "    {{ \"kind\": \"{}\", \"start\": {}, \"end\": {}, \"text\": {} }}",
+                    m.kind.label(),
+                    m.start,
+                    m.end,
+                    json_escape(matched_text)
+                ));
+            }
+            json.push_str("\n  ]\n}\n");
+            ctx.out.write_all(json.as_bytes())?;
+        }
+    } else {
+        if ctx.check {
+            if !matches.is_empty() && ctx.verbose {
                 for m in matches {
                     eprintln!(
                         "leakguard: {}: found {} at {}..{}",
@@ -351,11 +394,28 @@ fn process_chunk<W: Write>(input: &str, ctx: &mut ProcessCtx<'_, W>) -> io::Resu
                     );
                 }
             }
+        } else {
+            ctx.out.write_all(ctx.redactor.clean(input).as_bytes())?;
         }
-    } else {
-        ctx.out.write_all(ctx.redactor.clean(input).as_bytes())?;
     }
     Ok(())
+}
+
+fn json_escape(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len() + 2);
+    escaped.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 fn starts_private_key_block(input: &str) -> bool {
