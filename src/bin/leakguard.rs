@@ -365,16 +365,14 @@ fn process_reader<R: BufRead, W: Write>(
         if !pending_private_key.is_empty() {
             pending_private_key.push_str(&line);
             pending_lines += 1;
-            if private_key_block_has_end(&line) {
-                process_chunk(&pending_private_key, ctx)?;
-                pending_private_key.clear();
-                pending_lines = 0;
-            } else if pending_private_key.len() >= MAX_PENDING_BYTES
-                || pending_lines >= MAX_PENDING_LINES
-            {
-                // Malformed / unterminated block: flush what we have through
-                // the normal redactor and resume streaming so memory stays
-                // bounded and no input is dropped.
+            // Flush either because the block is complete, or because it has
+            // grown past the cap -- a malformed block with no END marker must
+            // not buffer the rest of the stream. Both cases emit what we have
+            // and resume normal line-by-line streaming, so no input is dropped.
+            let block_complete = private_key_block_has_end(&line);
+            let over_cap = pending_private_key.len() >= MAX_PENDING_BYTES
+                || pending_lines >= MAX_PENDING_LINES;
+            if block_complete || over_cap {
                 process_chunk(&pending_private_key, ctx)?;
                 pending_private_key.clear();
                 pending_lines = 0;
