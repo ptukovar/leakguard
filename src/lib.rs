@@ -1,10 +1,25 @@
 //! `leakguard` -- fast, zero-dependency redaction of secrets and PII from text.
 //!
-//! `leakguard` finds and removes sensitive data -- emails, credit-card numbers,
-//! IP addresses, JWTs, US SSNs, MAC addresses, AWS keys, URLs with embedded
-//! credentials -- from arbitrary strings and log lines. It has **no
-//! dependencies**, is `#![no_std]`-friendly (with `alloc`), and ships with a
-//! small, hand-written scanner for every detector (no regex engine).
+//! `leakguard` finds and removes sensitive data from arbitrary strings and log
+//! lines. It has **no dependencies**, is `#![no_std]`-friendly (with `alloc`),
+//! and ships with a small, hand-written scanner for every detector (no regex
+//! engine).
+//!
+//! # Built-in detectors
+//!
+//! Enabled by [`Redactor::new`]:
+//!
+//! - **Cloud & platform keys**: AWS access keys, Google API keys, Azure storage
+//!   connection strings.
+//! - **Service tokens**: GitHub (`ghp_`, `github_pat_`), Slack (`xoxb-`),
+//!   Stripe (`sk_live_`), OpenAI (`sk-`, `sk-proj-`), Telegram, Discord, JWTs.
+//! - **Credentials**: PEM private-key blocks, `user:pass@host` URL credentials.
+//! - **PII & financial**: emails, credit-card numbers (Luhn-validated), IBANs
+//!   (mod-97-validated), US SSNs, IPv4/IPv6 addresses, MAC addresses.
+//!
+//! Opt-in (the most false-positive-prone; add with
+//! [`Redactor::with_detector`]): [`detectors::PhoneNumber`] and
+//! [`detectors::HighEntropy`].
 //!
 //! # Quick start
 //!
@@ -85,8 +100,14 @@ pub enum Mask {
     /// Replace each *character* of the match with `ch`.
     Char(char),
     /// Keep the last `keep_last` characters; replace the rest with `ch`.
+    ///
+    /// `keep_last` is clamped so that **at least half** of the match (rounded
+    /// up) is always masked. A mask can therefore never return the matched
+    /// text unchanged, no matter how large `keep_last` is: asking to keep 99
+    /// characters of a 16-character card still masks the leading 8.
     Partial {
-        /// Number of trailing characters to preserve.
+        /// Number of trailing characters to preserve. Clamped to at most half
+        /// the match length, so some of the value is always hidden.
         keep_last: usize,
         /// Fill character for the masked portion.
         ch: char,
@@ -148,10 +169,13 @@ impl Redactor {
 
     /// Create a redactor that only enables the given built-in [`Kind`]s.
     ///
+    /// This can select **any** built-in detector, including the opt-in
+    /// [`Kind::PhoneNumber`] that [`Redactor::new`] leaves disabled.
+    ///
     /// Unknown / [`Kind::Custom`] kinds are ignored (add those via
     /// [`with_detector`](Redactor::with_detector)).
     pub fn only(kinds: &[Kind]) -> Self {
-        let detectors = default_detectors()
+        let detectors = all_detectors()
             .into_iter()
             .filter(|d| kinds.contains(&d.kind()))
             .collect();
@@ -182,20 +206,30 @@ impl Redactor {
     /// Find all matches in `input`, sorted by position with overlaps resolved
     /// (longer / earlier matches win). Does not modify the input.
     pub fn find(&self, input: &str) -> Vec<Match> {
-        let mut raw = Vec::new();
-        for d in &self.detectors {
-            d.detect(input, &mut raw);
+        let mut raw: Vec<(usize, Match)> = Vec::new();
+        let mut buf = Vec::new();
+        for (priority, d) in self.detectors.iter().enumerate() {
+            buf.clear();
+            d.detect(input, &mut buf);
+            raw.extend(buf.drain(..).map(|m| (priority, m)));
         }
         resolve_overlaps(raw)
     }
 
     /// Return `true` if `input` contains any sensitive data.
+    ///
+    /// Short-circuits on the first detector that reports a match and reuses a
+    /// single scratch buffer, so it never allocates once per detector.
     pub fn is_dirty(&self, input: &str) -> bool {
-        self.detectors.iter().any(|d| {
-            let mut v = Vec::new();
+        let mut v = Vec::new();
+        for d in &self.detectors {
+            v.clear();
             d.detect(input, &mut v);
-            !v.is_empty()
-        })
+            if !v.is_empty() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Return a vector of cleaned copies for an iterator of input strings.
@@ -237,7 +271,9 @@ impl Redactor {
                 .collect(),
             Mask::Partial { keep_last, ch } => {
                 let total = original.chars().count();
-                let keep = (*keep_last).min(total);
+                // Never reveal more than half of a match: a masking strategy
+                // must not be able to return its input verbatim.
+                let keep = (*keep_last).min(total / 2);
                 let masked = total - keep;
                 let mut s = String::with_capacity(total);
                 for _ in 0..masked {
@@ -251,7 +287,12 @@ impl Redactor {
     }
 }
 
-/// All built-in detectors, in priority order (earlier = preferred on overlap ties).
+/// All built-in **default** detectors, in priority order (earlier = higher
+/// specificity, and wins when two matches overlap).
+///
+/// [`detectors::PhoneNumber`] and [`detectors::HighEntropy`] are deliberately
+/// **not** included: both are the most false-positive-prone detectors, so they
+/// are opt-in via [`Redactor::with_detector`].
 fn default_detectors() -> Vec<Box<dyn Detector>> {
     use detectors::*;
     alloc::vec![
@@ -275,20 +316,43 @@ fn default_detectors() -> Vec<Box<dyn Detector>> {
         Box::new(IpV4),
         Box::new(MacAddress),
         Box::new(UsSsn),
-        Box::new(PhoneNumber),
     ]
 }
 
+/// Every built-in [`Kind`] that [`Redactor::only`] can construct, in the same
+/// priority order as [`default_detectors`]. Includes the opt-in detectors.
+fn all_detectors() -> Vec<Box<dyn Detector>> {
+    let mut v = default_detectors();
+    v.push(Box::new(detectors::PhoneNumber));
+    v
+}
+
 /// Sort matches and drop ones overlapping a previously kept match.
-/// Preference: earlier start; on tie, longer span; on tie, insertion order.
-fn resolve_overlaps(mut matches: Vec<Match>) -> Vec<Match> {
-    matches.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.len().cmp(&a.len())));
+///
+/// Resolution order:
+/// 1. **Detector priority** -- a higher-specificity detector (earlier in
+///    [`default_detectors`]) wins an overlap outright, even if it starts later.
+///    This stops a broad match such as a phone number from swallowing a JWT.
+/// 2. Earlier start.
+/// 3. Longer span.
+fn resolve_overlaps(mut matches: Vec<(usize, Match)>) -> Vec<Match> {
+    // Highest priority (lowest index) first; then earliest; then longest.
+    matches.sort_by(|(pa, a), (pb, b)| {
+        pa.cmp(pb)
+            .then_with(|| a.start.cmp(&b.start))
+            .then_with(|| b.len().cmp(&a.len()))
+    });
     let mut kept: Vec<Match> = Vec::with_capacity(matches.len());
-    let mut last_end = 0usize;
-    for m in matches {
-        if m.start >= last_end {
-            last_end = m.end;
-            kept.push(m);
+    for (_, m) in matches {
+        // Keep only matches that don't overlap anything already accepted.
+        // `kept` is maintained in start order, so a binary search locates the
+        // only two candidates that can overlap `m` -- this keeps resolution
+        // O(k log k) rather than O(k^2) on match-dense input.
+        let idx = kept.partition_point(|k| k.start <= m.start);
+        let overlaps_prev = idx > 0 && kept[idx - 1].end > m.start;
+        let overlaps_next = idx < kept.len() && m.end > kept[idx].start;
+        if !overlaps_prev && !overlaps_next {
+            kept.insert(idx, m);
         }
     }
     kept

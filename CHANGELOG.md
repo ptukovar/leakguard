@@ -5,6 +5,36 @@ All notable changes to this project are documented here. The format is based on
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.7.0] - 2026-07-27
+
+### Fixed
+- `CreditCard` detector no longer skips a card that follows a digit and a separator, such as `qty 7 4111 1111 1111 1111` or `id 9-4111111111111111`.
+- `Mask::Partial` no longer returns the matched value unchanged when `keep_last` reaches the match length; `keep_last` is now clamped to at most half the match.
+- `TelegramToken` detector no longer misses the shortest valid token when it ends the input.
+- Prefix-based detectors now match after a digit, `-`, or `_`, so tokens such as `v2AKIAIOSFODNN7EXAMPLE` and `id42ghp_...` are redacted.
+- `Email` detector now covers non-ASCII local parts instead of leaving a leading fragment in the output.
+- `UrlCredentials` no longer scans to end of input for every `://`; 1 MiB of `a://` took 14 s and now takes 4 ms.
+- CLI no longer re-scans the whole buffered block for each line following an unterminated PEM header; an 8 MB file took 507 s and now takes 0.6 s, with the buffer capped at 1 MiB or 10000 lines.
+- CLI `--json` now emits one compact object per line (NDJSON) instead of concatenated multi-line objects that no JSON parser accepted.
+- CLI `--json` no longer prints matched secret values by default, including under `--check`, where they could reach CI build logs.
+- CLI JSON output now escapes control characters as `\u00XX` as required by RFC 8259.
+- Overlap resolution now prefers the higher-specificity detector, so a phone number no longer shadows an adjacent JWT.
+
+### Changed
+- `PhoneNumber` is no longer enabled by default; it matched dates such as `2026-06-06 12` and corrupted ordinary log timestamps. Enable it with `Redactor::new().with_detector(PhoneNumber)`; the CLI `--only phone` and `--without phone` flags are unaffected.
+- `PhoneNumber` now rejects calendar dates, matches followed by `:`, thousands-separated integers, and runs of single digits.
+- `Redactor::only` can select any built-in detector, including the opt-in `PhoneNumber`.
+- `is_dirty` stops at the first match instead of running every detector.
+
+### Added
+- CLI `--show-values` flag to include matched text in `--json` output.
+- Bypass regression matrix in `tests/bypass.rs` covering every built-in detector across nineteen surrounding contexts.
+- Clean-log fixture in `tests/false_positives.rs` asserting ordinary log output passes through unchanged.
+- Sub-quadratic scaling checks in `tests/complexity.rs`, ignored by default and run with `cargo test --release --test complexity -- --ignored`.
+- Release checklist in `RELEASE.md`, referenced since 0.5.0 but never added.
+- README rows for the Azure, Telegram, and Discord detectors, plus notes on token boundary rules and Luhn checksum collisions.
+
 ## [0.6.1] - 2026-07-20
 - Syntax fix
 
@@ -84,7 +114,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `leakguard` CLI for redacting stdin/files, with a `--check` mode for CI guards.
 - `redact_logs` example and an integration test suite.
 
-[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ptukovar/leakguard/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/ptukovar/leakguard/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/ptukovar/leakguard/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ptukovar/leakguard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ptukovar/leakguard/compare/v0.3.0...v0.4.0

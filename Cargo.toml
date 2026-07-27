@@ -1,6 +1,6 @@
 [package]
 name = "leakguard"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.70"
 authors = ["ptukovar","github.com/ptukovar"]
@@ -12,7 +12,7 @@ readme = "README.md"
 license = "MIT OR Apache-2.0"
 keywords = ["redaction", "pii", "secrets", "logging", "privacy"]
 categories = ["text-processing", "command-line-utilities", "value-formatting"]
-exclude = ["/.github", "/assets"]
+exclude = ["/.github"]
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -121,6 +121,50 @@ fn fuzz_style_generated_inputs_keep_match_offsets_valid() {
 }
 
 #[test]
+fn non_ascii_email_local_parts_match_whole_and_stay_on_boundaries() {
+    let redactor = Redactor::new();
+    let cases = [
+        "písmena@example.com",
+        "jörg@example.com",
+        "日本@example.com",
+        "ünïcodé.tëst@example.co.uk",
+        "Ω@example.com",
+        "🙂user@example.com",
+    ];
+
+    for input in cases {
+        assert_redactor_invariants(&redactor, input);
+        let matches = redactor.find(input);
+        assert_eq!(matches.len(), 1, "expected one match in {input:?}");
+        // The whole local part must be covered -- no leading fragment left over.
+        assert_eq!(
+            matches[0].start,
+            0,
+            "leaked a prefix of {input:?}: {:?}",
+            &input[..matches[0].start]
+        );
+        assert_eq!(matches[0].end, input.len(), "did not cover {input:?}");
+        assert_eq!(redactor.clean(input), "[REDACTED:EMAIL]");
+    }
+}
+
+#[test]
+fn non_ascii_inputs_never_slice_mid_character() {
+    // Multibyte text interleaved with secrets, including at boundaries.
+    let redactor = Redactor::new();
+    let cases = [
+        "🙂 alice@example.com 🙂",
+        "héllo AKIAIOSFODNN7EXAMPLE wörld",
+        "中文4111111111111111中文",
+        "é10.0.0.1é",
+        "ß123-45-6789ß",
+    ];
+    for input in cases {
+        assert_redactor_invariants(&redactor, input);
+    }
+}
+
+#[test]
 fn adversarial_inputs_do_not_panic_or_emit_invalid_offsets() {
     let redactor = Redactor::new();
     let cases = [

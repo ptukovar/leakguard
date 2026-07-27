@@ -534,3 +534,185 @@ fn cli_json_output() {
     assert!(stdout.contains("EMAIL"));
     assert!(stdout.contains("matches"));
 }
+
+// --- 0.7.0 CLI regressions ---
+
+#[test]
+fn cli_json_emits_ndjson_one_object_per_line() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .arg("--json")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    child
+        .stdin
+        .take()
+        .expect("open stdin")
+        .write_all(b"contact alice@example.com\nip 10.0.0.1\nnothing here\n")
+        .expect("write input");
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 3, "expected one JSON object per input line");
+    // Each line must be a self-contained object: balanced braces, no newline
+    // inside. A dependency-free structural check stands in for a JSON parser.
+    for line in lines {
+        assert!(
+            line.starts_with('{') && line.ends_with('}'),
+            "not compact: {line}"
+        );
+        let opens = line.matches('{').count();
+        let closes = line.matches('}').count();
+        assert_eq!(opens, closes, "unbalanced braces in {line}");
+    }
+}
+
+#[test]
+fn cli_json_omits_secret_values_by_default() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    for args in [vec!["--json"], vec!["--check", "--json"]] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn leakguard CLI");
+        child
+            .stdin
+            .take()
+            .expect("open stdin")
+            .write_all(b"aws AKIAIOSFODNN7EXAMPLE\n")
+            .expect("write input");
+
+        let output = child.wait_with_output().expect("wait for CLI");
+        let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+        assert!(
+            !stdout.contains("AKIAIOSFODNN7EXAMPLE"),
+            "secret leaked with {args:?}: {stdout}"
+        );
+        assert!(stdout.contains("AWS_ACCESS_KEY"), "kind missing: {stdout}");
+    }
+}
+
+#[test]
+fn cli_json_show_values_opts_into_secret_text() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .args(["--json", "--show-values"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    child
+        .stdin
+        .take()
+        .expect("open stdin")
+        .write_all(b"aws AKIAIOSFODNN7EXAMPLE\n")
+        .expect("write input");
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(
+        stdout.contains("\"text\":\"AKIAIOSFODNN7EXAMPLE\""),
+        "got: {stdout}"
+    );
+}
+
+#[test]
+fn cli_json_escapes_control_characters() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // A control character inside the matched text must be escaped as \u00XX,
+    // otherwise the emitted JSON is invalid per RFC 8259. This goes through
+    // stdin rather than a filename because Windows rejects bytes 0x00-0x1F in
+    // paths, which made the earlier filename-based version fail there.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .args(["--json", "--show-values"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    child
+        .stdin
+        .take()
+        .expect("open stdin")
+        .write_all(b"DefaultEndpointsProtocol=https;AccountName=x;AccountKey=abc\x01def123==;\n")
+        .expect("write input");
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(
+        stdout.contains("\\u0001"),
+        "control char not escaped: {stdout}"
+    );
+    assert!(
+        !stdout.contains('\u{1}'),
+        "raw control char emitted: {stdout}"
+    );
+}
+
+#[test]
+fn cli_unterminated_private_key_preserves_content_and_streams() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // An unterminated PEM must not be dropped, and single-line secrets inside
+    // the buffered fragment must still be redacted.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    child
+        .stdin
+        .take()
+        .expect("open stdin")
+        .write_all(b"-----BEGIN RSA PRIVATE KEY-----\nbody\nalice@example.com\n")
+        .expect("write input");
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("-----BEGIN RSA PRIVATE KEY-----"));
+    assert!(stdout.contains("[REDACTED:EMAIL]"));
+    assert!(!stdout.contains("alice@example.com"));
+}
+
+#[test]
+fn cli_keep_larger_than_match_still_masks() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_leakguard"))
+        .args(["--mask", "partial", "--keep", "99"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn leakguard CLI");
+    child
+        .stdin
+        .take()
+        .expect("open stdin")
+        .write_all(b"ip 10.0.0.1\n")
+        .expect("write input");
+
+    let output = child.wait_with_output().expect("wait for CLI");
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(
+        !stdout.contains("10.0.0.1"),
+        "value survived --keep 99: {stdout}"
+    );
+    assert!(stdout.contains('*'), "expected masking: {stdout}");
+}

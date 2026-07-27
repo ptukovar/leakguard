@@ -6,6 +6,7 @@
 //!   leakguard --mask char --only email,ipv4 < input.txt
 //!   leakguard --without phone app.log
 //!   cat data.txt | leakguard --check --verbose   # exit 1 and report kinds found
+//!   tail -f app.log | leakguard --json           # NDJSON findings, no values
 
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::process::ExitCode;
@@ -26,11 +27,16 @@ OPTIONS:
     --mask <MODE>     label (default) | fixed | char | partial | hash
     --fixed <STR>     replacement string for --mask fixed (default: [REDACTED])
     --char <C>        fill char for char/partial masks (default: *)
-    --keep <N>        characters to keep for --mask partial (default: 4)
+    --keep <N>        characters to keep for --mask partial (default: 4;
+                      clamped to at most half the match so a mask can never
+                      return the value unchanged)
     --only <LIST>     comma-separated kinds to detect (e.g. email,ipv4,jwt)
     --without <LIST>  comma-separated kinds to skip from the selected detectors
-    --format <FMT>    output format: text (default) or json
+    --format <FMT>    output format: text (default) or json (NDJSON: one
+                      compact JSON object per input line)
     --json            shortcut for --format json
+    --show-values     include the matched secret text in --json output
+                      (omitted by default so findings can be logged safely)
     --check           don't print; exit 1 if any sensitive data is found
     -v, --verbose     with --check, print matched kinds and offsets to stderr
     --list-kinds      print supported kind names, then exit
@@ -141,6 +147,7 @@ fn run() -> io::Result<ExitCode> {
     let mut without: Vec<Kind> = Vec::new();
     let mut check = false;
     let mut verbose = false;
+    let mut show_values = false;
     let mut files: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -175,6 +182,7 @@ fn run() -> io::Result<ExitCode> {
                 "--without",
             )?),
             "--check" => check = true,
+            "--show-values" => show_values = true,
             "-v" | "--verbose" => verbose = true,
             other if other.starts_with('-') && other != "-" => {
                 return Err(io::Error::new(
@@ -228,6 +236,7 @@ fn run() -> io::Result<ExitCode> {
             detects_private_keys,
             verbose,
             &format,
+            show_values,
             "<stdin>",
             &mut out,
             &mut found_any,
@@ -244,6 +253,7 @@ fn run() -> io::Result<ExitCode> {
                     detects_private_keys,
                     verbose,
                     &format,
+                    show_values,
                     "<stdin>",
                     &mut out,
                     &mut found_any,
@@ -258,6 +268,7 @@ fn run() -> io::Result<ExitCode> {
                     detects_private_keys,
                     verbose,
                     &format,
+                    show_values,
                     f,
                     &mut out,
                     &mut found_any,
@@ -280,6 +291,7 @@ struct ProcessCtx<'a, W: Write> {
     detects_private_keys: bool,
     verbose: bool,
     format: &'a str,
+    show_values: bool,
     source: &'a str,
     out: &'a mut W,
     found_any: &'a mut bool,
@@ -293,6 +305,7 @@ impl<'a, W: Write> ProcessCtx<'a, W> {
         detects_private_keys: bool,
         verbose: bool,
         format: &'a str,
+        show_values: bool,
         source: &'a str,
         out: &'a mut W,
         found_any: &'a mut bool,
@@ -303,6 +316,7 @@ impl<'a, W: Write> ProcessCtx<'a, W> {
             detects_private_keys,
             verbose,
             format,
+            show_values,
             source,
             out,
             found_any,
@@ -310,11 +324,19 @@ impl<'a, W: Write> ProcessCtx<'a, W> {
     }
 }
 
+/// Upper bound on a buffered PEM block before it is flushed as ordinary text.
+/// Guards against an unterminated `-----BEGIN ... PRIVATE KEY-----` line
+/// causing unbounded memory growth.
+const MAX_PENDING_BYTES: usize = 1024 * 1024;
+/// Line-count companion to [`MAX_PENDING_BYTES`].
+const MAX_PENDING_LINES: usize = 10_000;
+
 fn process_reader<R: BufRead, W: Write>(
     reader: &mut R,
     ctx: &mut ProcessCtx<'_, W>,
 ) -> io::Result<()> {
     let mut pending_private_key = String::new();
+    let mut pending_lines = 0usize;
     let mut line = String::new();
 
     loop {
@@ -329,18 +351,33 @@ fn process_reader<R: BufRead, W: Write>(
             && starts_private_key_block(&line)
         {
             pending_private_key.push_str(&line);
-            if private_key_block_has_end(&pending_private_key) {
+            pending_lines = 1;
+            // Only the newly read line is inspected for the END marker, so the
+            // accumulated buffer is never re-scanned (that was quadratic).
+            if private_key_block_has_end(&line) {
                 process_chunk(&pending_private_key, ctx)?;
                 pending_private_key.clear();
+                pending_lines = 0;
             }
             continue;
         }
 
         if !pending_private_key.is_empty() {
             pending_private_key.push_str(&line);
-            if private_key_block_has_end(&pending_private_key) {
+            pending_lines += 1;
+            if private_key_block_has_end(&line) {
                 process_chunk(&pending_private_key, ctx)?;
                 pending_private_key.clear();
+                pending_lines = 0;
+            } else if pending_private_key.len() >= MAX_PENDING_BYTES
+                || pending_lines >= MAX_PENDING_LINES
+            {
+                // Malformed / unterminated block: flush what we have through
+                // the normal redactor and resume streaming so memory stays
+                // bounded and no input is dropped.
+                process_chunk(&pending_private_key, ctx)?;
+                pending_private_key.clear();
+                pending_lines = 0;
             }
             continue;
         }
@@ -364,24 +401,34 @@ fn process_chunk<W: Write>(input: &str, ctx: &mut ProcessCtx<'_, W>) -> io::Resu
     }
     if ctx.format == "json" {
         if !matches.is_empty() || !ctx.check {
+            // NDJSON: exactly one compact object per input chunk, so the output
+            // stays streamable (`tail -f`) and greppable, and each line parses
+            // independently.
             let mut json = String::new();
-            json.push_str("{\n  \"source\": ");
+            json.push('{');
+            json.push_str("\"source\":");
             json.push_str(&json_escape(ctx.source));
-            json.push_str(",\n  \"matches\": [\n");
+            json.push_str(",\"matches\":[");
             for (idx, m) in matches.iter().enumerate() {
                 if idx > 0 {
-                    json.push_str(",\n");
+                    json.push(',');
                 }
-                let matched_text = m.text(input);
                 json.push_str(&format!(
-                    "    {{ \"kind\": \"{}\", \"start\": {}, \"end\": {}, \"text\": {} }}",
+                    "{{\"kind\":\"{}\",\"start\":{},\"end\":{}",
                     m.kind.label(),
                     m.start,
-                    m.end,
-                    json_escape(matched_text)
+                    m.end
                 ));
+                // The matched text is a secret: only emit it when explicitly
+                // requested, never by default and never merely because
+                // `--check` was passed.
+                if ctx.show_values {
+                    json.push_str(",\"text\":");
+                    json.push_str(&json_escape(m.text(input)));
+                }
+                json.push('}');
             }
-            json.push_str("\n  ]\n}\n");
+            json.push_str("]}\n");
             ctx.out.write_all(json.as_bytes())?;
         }
     } else if ctx.check {
@@ -409,6 +456,8 @@ fn json_escape(s: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
+            // RFC 8259 requires every code point below 0x20 to be escaped.
+            c if (c as u32) < 0x20 => escaped.push_str(&format!("\\u{:04x}", c as u32)),
             other => escaped.push(other),
         }
     }

@@ -47,7 +47,7 @@ fills that gap with:
 ```toml
 # Library
 [dependencies]
-leakguard = "0.5.0"
+leakguard = "0.7.0"
 ```
 
 ```sh
@@ -133,6 +133,12 @@ leakguard --only email,ipv4 --mask char --char '#' < input.txt
 # Redact everything except phone numbers
 leakguard --without phone app.log
 
+# Structured findings as NDJSON (one compact object per line)
+tail -f app.log | leakguard --json
+
+# Include the matched secret text (off by default so findings are safe to log)
+leakguard --json --show-values suspect.log
+
 # Print supported detector names
 leakguard --list-kinds
 
@@ -153,7 +159,6 @@ leakguard --check --verbose secrets-scan.txt || echo "found sensitive data!"
 | `MacAddress`      | `00:1A:2B:3C:4D:5E`                       | `:` or `-` separators              |
 | `AwsAccessKey`    | `AKIAIOSFODNN7EXAMPLE`                    | AKIA/ASIA/… + 16 chars             |
 | `UrlCredentials`  | `https://user:pass@host`                 | redacts the `user:pass` userinfo   |
-| `PhoneNumber`     | `+1 (415) 555-0132`                       | conservative; needs grouping/`+`   |
 | `GitHubToken`     | `ghp_…`, `github_pat_…`                   | PAT / OAuth / app / refresh        |
 | `SlackToken`      | `xoxb-…`, `xoxp-…`                        | bot / user / app tokens            |
 | `StripeKey`       | `sk_live_…`, `pk_test_…`                  | secret / restricted / publishable  |
@@ -161,17 +166,28 @@ leakguard --check --verbose secrets-scan.txt || echo "found sensitive data!"
 | `OpenAiKey`       | `sk-…`, `sk-proj-…`                       | hyphenated form (≠ Stripe `sk_`)   |
 | `PrivateKey`      | `-----BEGIN … PRIVATE KEY-----`           | whole PEM block, incl. body        |
 | `Iban`            | `DE89370400440532013000`                  | **mod-97 checksum-validated**      |
+| `AzureConnectionString` | `DefaultEndpointsProtocol=…;AccountKey=…` | storage connection strings   |
+| `TelegramToken`   | `123456789:ABCdef…`                       | bot API token (`id:secret`)        |
+| `DiscordToken`    | `mfa.…`, `MTIz….Xyz….abc…`                | bot / user / MFA tokens            |
+| `PhoneNumber`     | `+1 (415) 555-0132`                       | **opt-in** since 0.7.0 (see below) |
 | `GenericSecret`   | high-entropy tokens                       | **opt-in** `HighEntropy` detector  |
 | `Custom(&str)`    | anything you want                        | via `FnDetector`                   |
 
-> `GenericSecret` (the `HighEntropy` detector) is **not** in the defaults — it's
-> the most false-positive-prone, so you enable it explicitly:
+> Two detectors are **not** in the defaults because they are the most
+> false-positive-prone. Enable them explicitly:
 >
 > ```rust
-> use leakguard::{Redactor, detectors::HighEntropy};
+> use leakguard::{Redactor, detectors::{HighEntropy, PhoneNumber}};
+>
+> // Generic high-entropy secrets.
 > let s = Redactor::new().with_detector(HighEntropy::default());
 > // or tune it: HighEntropy::new(/* min_len */ 24, /* min_entropy bits */ 4.0)
+>
+> // Phone numbers (opt-in since 0.7.0 — see CHANGELOG for the rationale).
+> let s = Redactor::new().with_detector(PhoneNumber);
 > ```
+>
+> On the CLI, `--only phone` and `--without phone` continue to work as before.
 
 
 ## Security model and limitations
@@ -187,6 +203,20 @@ Important limitations:
   positives, so some real secrets or PII formats may not be detected.
 - Some detectors can still produce false positives, especially phone numbers and
   opt-in high-entropy scanning.
+- **Token boundaries.** Prefix-based detectors (`AKIA…`, `ghp_…`, `sk_live_…`,
+  `AIza…`, `xoxb-…`, `eyJ…`) require the prefix to start at a token boundary. A
+  preceding digit, `-`, or `_` is allowed (`v2AKIA…` and `id 9-ghp_…` are
+  redacted), but a prefix embedded directly after *letters* is treated as an
+  interior substring and is **not** matched — `notAIza…` is left alone. This
+  keeps identifiers that merely contain a prefix from being redacted.
+- **Checksum-only detectors match by chance.** `CreditCard` accepts any 13–19
+  digit run passing the Luhn check, which roughly one in ten arbitrary digit
+  runs does. A 14-digit timestamp such as `20260606120000` can therefore be
+  redacted as a card number. Use `--without credit_card` on inputs dominated by
+  long numeric identifiers.
+- **Adjacent values that change meaning are not matched.** Gluing a digit onto
+  a numeric secret produces a different value (`1` + `203.0.113.42` is not a
+  valid IPv4 address), so such strings are deliberately left alone.
 - Redaction should happen as early as possible, before sensitive data leaves your
   process or enters persistent logs.
 - `Mask::Hash` is a stable, non-cryptographic fingerprint for correlation only.
@@ -218,7 +248,7 @@ comparing changes.
 
 ```toml
 [dependencies]
-leakguard = { version = "0.5", default-features = false }
+leakguard = { version = "0.7", default-features = false }
 ```
 
 This drops the CLI and `std`-only conveniences but keeps the full detection and

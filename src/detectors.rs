@@ -90,9 +90,14 @@ fn is_b64url(b: u8) -> bool {
 }
 
 /// True if `b` continues an "atom" of an email local/domain part.
+///
+/// Bytes >= 0x80 are treated as atom bytes so internationalised local parts
+/// (`písmena@…`, `jörg@…`) are matched whole instead of leaking a prefix. The
+/// caller is responsible for snapping the resulting offset to a UTF-8
+/// character boundary.
 #[inline]
 fn is_email_atom(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'%' | b'+' | b'-')
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'%' | b'+' | b'-') || b >= 0x80
 }
 
 /// Find the run of bytes satisfying `pred` starting at `i`; returns end offset.
@@ -129,6 +134,11 @@ impl Detector for Email {
             let mut start = i;
             while start > 0 && is_email_atom(b[start - 1]) {
                 start -= 1;
+            }
+            // `is_email_atom` accepts raw continuation bytes, so snap forward
+            // to the nearest character boundary to keep offsets UTF-8 safe.
+            while start < i && !input.is_char_boundary(start) {
+                start += 1;
             }
             // Local part must be non-empty and not start/end with a dot.
             if start == i || b[start] == b'.' || b[i - 1] == b'.' {
@@ -200,20 +210,41 @@ impl Detector for CreditCard {
         let b = input.as_bytes();
         let mut i = 0;
         while i < b.len() {
-            let preceded_by_digit_or_sep_digit = i > 0
-                && (is_ascii_digit(b[i - 1])
-                    || ((b[i - 1] == b' ' || b[i - 1] == b'-')
-                        && i > 1
-                        && is_ascii_digit(b[i - 2])));
-            if !is_ascii_digit(b[i]) || preceded_by_digit_or_sep_digit {
+            if !is_ascii_digit(b[i]) {
                 i += 1;
                 continue;
+            }
+            // Only start at the beginning of a maximal digit group; starting
+            // mid-group would let a suffix of a longer number match.
+            if i > 0 && is_ascii_digit(b[i - 1]) {
+                i += 1;
+                continue;
+            }
+            let first_group_end = run(b, i, is_ascii_digit);
+            let first_group_len = first_group_end - i;
+            // If the previous token is a digit group of the *same* width joined
+            // by a single card separator, this group continues one longer
+            // grouped number (e.g. the 2nd group of a 20-digit run) rather than
+            // starting a card. Differing widths mean an unrelated preceding
+            // token (`qty 7 4111 ...`), which must not mask the card.
+            if i >= 2 && (b[i - 1] == b' ' || b[i - 1] == b'-') && is_ascii_digit(b[i - 2]) {
+                let mut p = i - 1;
+                while p > 0 && is_ascii_digit(b[p - 1]) {
+                    p -= 1;
+                }
+                if (i - 1) - p == first_group_len {
+                    i = first_group_end;
+                    continue;
+                }
             }
             let mut j = i;
             let mut digits = [0u8; 19];
             let mut total_digits = 0usize;
             let mut end = i;
-            while j < b.len() {
+            // Stop as soon as the candidate is provably too long: a card is at
+            // most 19 digits, so this bounds every candidate scan to a constant
+            // number of bytes and keeps the whole detector linear.
+            while j < b.len() && total_digits <= digits.len() {
                 if is_ascii_digit(b[j]) {
                     if total_digits < digits.len() {
                         digits[total_digits] = b[j];
@@ -238,7 +269,9 @@ impl Detector for CreditCard {
                 out.push(Match::new(Kind::CreditCard, i, end));
                 i = end;
             } else {
-                i += 1;
+                // Rejected: resume at the next group so a following card is
+                // still found, without rescanning this group's interior.
+                i = first_group_end;
             }
         }
     }
@@ -381,7 +414,9 @@ impl Detector for Jwt {
         let mut i = 0;
         while i + 3 <= b.len() {
             // JWT headers are base64url of `{"...` which starts with `eyJ`.
-            if &b[i..i + 3] != b"eyJ" || (i > 0 && is_b64url(b[i - 1])) {
+            // A preceding digit is allowed (see `bounded_left_relaxed`) so a
+            // token concatenated onto a number is still caught.
+            if &b[i..i + 3] != b"eyJ" || !bounded_left_relaxed(b, i) {
                 i += 1;
                 continue;
             }
@@ -520,7 +555,8 @@ impl Detector for AwsAccessKey {
         while i + 20 <= n {
             let prefix = &b[i..i + 4];
             let is_prefix = AWS_PREFIXES.iter().any(|p| p.as_slice() == prefix);
-            let bounded_left = i == 0 || !(b[i - 1].is_ascii_alphanumeric());
+            // Relaxed: a preceding digit is allowed so `v2AKIA...` still matches.
+            let bounded_left = bounded_left_relaxed(b, i);
             if is_prefix
                 && bounded_left
                 && b[i + 4..i + 20]
@@ -569,24 +605,30 @@ impl Detector for UrlCredentials {
                 scheme_start -= 1;
             }
             let auth_start = sep + needle.len();
-            // userinfo ends at the first '@' that precedes the next '/' '?' '#'.
-            let rest = &input[auth_start..];
-            let at = rest.find('@');
-            let path = rest.find(['/', '?', '#']);
-            let has_userinfo = match (at, path) {
-                (Some(a), Some(p)) => a < p,
-                (Some(_), None) => true,
-                _ => false,
-            };
-            if scheme_start < sep && has_userinfo {
-                let at_abs = auth_start + at.unwrap();
-                let userinfo = &input[auth_start..at_abs];
-                // Only treat as credentials if there's a colon (user:pass).
-                if userinfo.contains(':') {
-                    out.push(Match::new(Kind::UrlCredentials, auth_start, at_abs));
+            // The authority component ends at the first delimiter. Bounding the
+            // search here keeps this detector linear: without the bound, every
+            // `://` occurrence would scan to end-of-input looking for an '@'
+            // that may not exist, which is quadratic on inputs full of `://`.
+            let auth_end = auth_start
+                + b[auth_start..]
+                    .iter()
+                    .position(|&c| {
+                        matches!(c, b'/' | b'?' | b'#') || c.is_ascii_whitespace() || c < 0x20
+                    })
+                    .unwrap_or(b.len() - auth_start);
+            let authority = &input[auth_start..auth_end];
+            // userinfo ends at the last '@' within the authority component.
+            if scheme_start < sep {
+                if let Some(a) = authority.rfind('@') {
+                    let at_abs = auth_start + a;
+                    // Only treat as credentials if there's a colon (user:pass).
+                    if input[auth_start..at_abs].contains(':') {
+                        out.push(Match::new(Kind::UrlCredentials, auth_start, at_abs));
+                    }
                 }
             }
-            from = auth_start;
+            // Resume past the authority we just examined, never re-scanning it.
+            from = auth_end.max(auth_start + 1);
         }
     }
 }
@@ -605,6 +647,24 @@ fn is_token_char(b: u8) -> bool {
 #[inline]
 fn bounded_left(b: &[u8], i: usize) -> bool {
     i == 0 || !is_token_char(b[i - 1])
+}
+
+/// Relaxed left boundary for detectors with a long, distinctive prefix
+/// (`AKIA`, `ghp_`, `sk_live_`, `AIza`, `xoxb-`, `eyJ`...).
+///
+/// A preceding **digit** is permitted so that concatenated output such as
+/// `v2AKIA...` or `id42ghp_...` still redacts. A preceding *letter* or `_`/`-`
+/// is still rejected, because those usually mean the prefix is an interior
+/// substring of some longer identifier rather than a real secret.
+#[inline]
+fn bounded_left_relaxed(b: &[u8], i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    let prev = b[i - 1];
+    // `-` and `_` are delimiters in surrounding text (`id 9-AKIA...`), not part
+    // of the secret, so they are accepted alongside digits.
+    !is_token_char(prev) || prev.is_ascii_digit() || prev == b'-' || prev == b'_'
 }
 
 /// Right boundary check: the byte at `end` must not be a token char.
@@ -632,7 +692,7 @@ fn scan_prefixed(
     }
     let mut i = 0;
     while i + plen <= b.len() {
-        if &b[i..i + plen] == pb && bounded_left(b, i) {
+        if &b[i..i + plen] == pb && bounded_left_relaxed(b, i) {
             let body_start = i + plen;
             let body_end = run(b, body_start, is_token_char);
             let body_len = body_end - body_start;
@@ -727,7 +787,7 @@ impl Detector for GoogleApiKey {
         let mut i = 0;
         while i + 39 <= b.len() {
             if &b[i..i + 4] == b"AIza"
-                && bounded_left(b, i)
+                && bounded_left_relaxed(b, i)
                 && b[i + 4..i + 39].iter().all(|&c| is_token_char(c))
                 && bounded_right(b, i + 39)
             {
@@ -853,7 +913,7 @@ impl Detector for Iban {
                 && b[i + 1].is_ascii_uppercase()
                 && b[i + 2].is_ascii_digit()
                 && b[i + 3].is_ascii_digit()
-                && bounded_left(b, i);
+                && bounded_left_relaxed(b, i);
             if !head_ok {
                 i += 1;
                 continue;
@@ -936,9 +996,17 @@ impl Detector for PhoneNumber {
                                       // Plausible phone: 7..=15 digits, and grouping evidence (leading '+'
                                       // or at least one separator that sits between digits).
             let trailing_ok = bounded_right(b, end) && !(end < n && b[end] == b'@');
+            // A match immediately followed by ':' is a clock or a duration
+            // (`12:00:00`), not a phone number.
+            let clock_follows = end < n && b[end] == b':';
             // Ensure at least one separator is genuinely between two digits.
             let has_grouping = plus || (internal_seps >= 1 && grouped_between_digits(&b[i..end]));
-            let plausible = (7..=15).contains(&digits) && has_grouping && trailing_ok;
+            let plausible = (7..=15).contains(&digits)
+                && has_grouping
+                && trailing_ok
+                && !clock_follows
+                && !looks_like_date(&b[i..end])
+                && plausible_groups(&b[i..end]);
             if plausible {
                 out.push(Match::new(Kind::PhoneNumber, i, end));
                 i = end.max(i + 1);
@@ -947,6 +1015,85 @@ impl Detector for PhoneNumber {
             }
         }
     }
+}
+
+/// True if `s` opens with a calendar-date shape: `YYYY-MM-DD`, `YYYY.MM.DD`,
+/// or `YYYY/MM/DD` (optionally followed by more digits, e.g. a clock hour).
+///
+/// Date-stamped log lines are the single largest source of phone-number false
+/// positives, and `2026-06-06 12` would otherwise score as a 12-digit grouped
+/// number.
+fn looks_like_date(s: &[u8]) -> bool {
+    if s.len() < 10 {
+        return false;
+    }
+    let sep_at = |i: usize| matches!(s[i], b'-' | b'.' | b'/');
+    let digits_at = |r: core::ops::Range<usize>| r.into_iter().all(|i| s[i].is_ascii_digit());
+    // YYYY-MM-DD
+    if digits_at(0..4) && sep_at(4) && digits_at(5..7) && sep_at(7) && digits_at(8..10) {
+        let month: u32 = (s[5] - b'0') as u32 * 10 + (s[6] - b'0') as u32;
+        let day: u32 = (s[8] - b'0') as u32 * 10 + (s[9] - b'0') as u32;
+        if (1..=12).contains(&month) && (1..=31).contains(&day) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if every separated digit group has a plausible phone-number width.
+///
+/// Real numbers group in runs of 1-5 digits (country code, area code, local
+/// blocks). Thousands-separated integers such as `1 048 576` also match that
+/// shape, so space-separated groups are additionally required to not look like
+/// a 3-digit thousands run following a short leading group.
+fn plausible_groups(s: &[u8]) -> bool {
+    let is_sep = |c: u8| matches!(c, b'-' | b'.' | b' ' | b'(' | b')');
+    let mut groups: [usize; 16] = [0; 16];
+    let mut count = 0usize;
+    let mut cur = 0usize;
+    let mut space_separated = false;
+    let mut prev_sep = 0u8;
+    for &c in s {
+        if c.is_ascii_digit() {
+            cur += 1;
+        } else if is_sep(c) {
+            if cur > 0 && count < groups.len() {
+                groups[count] = cur;
+                count += 1;
+            }
+            if c == b' ' && cur > 0 {
+                space_separated = true;
+            }
+            prev_sep = c;
+            cur = 0;
+        }
+    }
+    let _ = prev_sep;
+    if cur > 0 && count < groups.len() {
+        groups[count] = cur;
+        count += 1;
+    }
+    if count == 0 {
+        return false;
+    }
+    // No single group longer than 5 digits between separators.
+    if groups[..count].iter().any(|&g| g > 5) {
+        return false;
+    }
+    // `1 048 576`: a 1-digit lead followed only by 3-digit space-separated
+    // groups is a thousands-separated integer, not a phone number.
+    if space_separated && count >= 2 && groups[0] <= 2 {
+        let rest_all_three = groups[1..count].iter().all(|&g| g == 3);
+        if rest_all_three {
+            return false;
+        }
+    }
+    // `1 2 3 4 5 6 7 8`: a list of single digits is not a phone number. Real
+    // formats always contain at least one multi-digit block.
+    if groups[..count].iter().all(|&g| g <= 1) {
+        return false;
+    }
+    true
 }
 
 /// True if at least one separator in `s` has a digit on both sides.
@@ -1142,19 +1289,28 @@ impl Detector for TelegramToken {
 
     fn detect(&self, input: &str, out: &mut Vec<Match>) {
         let b = input.as_bytes();
+        // Shortest possible token: MIN_ID digits + ':' + MIN_BODY body chars.
+        // Deriving the loop bound from the ranges below keeps it from drifting
+        // out of sync with them (a hard-coded 40 previously skipped the
+        // shortest valid 39-byte token when it ended the input).
+        const MIN_ID: usize = 8;
+        const MAX_ID: usize = 11;
+        const MIN_BODY: usize = 30;
+        const MAX_BODY: usize = 50;
+        const MIN_TOKEN: usize = MIN_ID + 1 + MIN_BODY;
         let mut i = 0;
-        while i + 40 <= b.len() {
-            if b[i].is_ascii_digit() && bounded_left(b, i) {
+        while i + MIN_TOKEN <= b.len() {
+            if b[i].is_ascii_digit() && bounded_left_relaxed(b, i) {
                 let mut j = i;
                 while j < b.len() && b[j].is_ascii_digit() {
                     j += 1;
                 }
                 let digits_len = j - i;
-                if (8..=11).contains(&digits_len) && j < b.len() && b[j] == b':' {
+                if (MIN_ID..=MAX_ID).contains(&digits_len) && j < b.len() && b[j] == b':' {
                     let token_start = j + 1;
                     let token_end = run(b, token_start, is_token_char);
                     let token_len = token_end - token_start;
-                    if (30..=50).contains(&token_len) && bounded_right(b, token_end) {
+                    if (MIN_BODY..=MAX_BODY).contains(&token_len) && bounded_right(b, token_end) {
                         out.push(Match::new(Kind::TelegramToken, i, token_end));
                         i = token_end;
                         continue;
