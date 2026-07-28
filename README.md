@@ -118,6 +118,29 @@ let s = Redactor::new().with_detector(tickets);
 assert_eq!(s.clean("see JIRA-1234"), "see [REDACTED:TICKET]");
 ```
 
+### Redact Large Inputs in Parallel
+
+Enable the opt-in `parallel` feature to scan large inputs across detectors with
+scoped standard library threads:
+
+```toml
+[dependencies]
+leakguard = { version = "0.7", features = ["parallel"] }
+```
+
+```rust
+use leakguard::Redactor;
+
+let redactor = Redactor::new();
+let cleaned = redactor.clean_parallel(&large_input);
+```
+
+The parallel APIs leave one available CPU for other work and use the serial
+path for inputs smaller than 256 KiB. `find_parallel` and `clean_parallel`
+produce the same matches and output as their serial counterparts. Use one level
+of parallelism at a time when the caller already processes multiple inputs in
+parallel.
+
 ## CLI usage
 
 ```sh
@@ -238,11 +261,13 @@ harness:
 ```sh
 cargo run --example redact_logs
 cargo run --release --example bench
+cargo run --release --all-features --example bench
 ```
 
 The benchmark harness is intentionally dependency-free and uses
 `std::time::Instant`, so run it several times on an otherwise idle machine when
-comparing changes.
+comparing changes. The all-features run also compares serial and parallel
+redaction on a large synthetic input.
 
 ## `no_std`
 

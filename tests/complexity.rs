@@ -101,6 +101,35 @@ fn all_default_detectors_scale_sub_quadratically() {
 
 #[test]
 #[ignore = "timing-sensitive; run with --release --ignored"]
+fn dense_matches_scale_sub_quadratically() {
+    let redactor = Redactor::new();
+    let unit = "alice@example.com 203.0.113.42 4111 1111 1111 1111\n";
+    let sizes = [4_096usize, 8_192, 16_384, 32_768];
+    let mut previous: Option<f64> = None;
+
+    for repetitions in sizes {
+        let input = unit.repeat(repetitions);
+        let mut samples = [0.0; 5];
+        for sample in &mut samples {
+            *sample = time_find(&redactor, &input);
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let elapsed = samples[samples.len() / 2];
+        println!("  {:>9} B  {:>9.3} ms", input.len(), elapsed * 1000.0);
+
+        if let Some(prev) = previous {
+            let ratio = elapsed / prev.max(f64::EPSILON);
+            assert!(
+                ratio <= MAX_RATIO_PER_DOUBLING,
+                "dense matching grew {ratio:.2}x per doubling -- quadratic regression?"
+            );
+        }
+        previous = Some(elapsed);
+    }
+}
+
+#[test]
+#[ignore = "timing-sensitive; run with --release --ignored"]
 fn cli_unterminated_pem_scales_sub_quadratically() {
     use std::io::Write;
     use std::process::{Command, Stdio};
