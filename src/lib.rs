@@ -5,6 +5,10 @@
 //! and ships with a small, hand-written scanner for every detector (no regex
 //! engine).
 //!
+//! Enable the `parallel` feature to use `Redactor::find_parallel` and
+//! `Redactor::clean_parallel` for large inputs. These APIs use scoped standard
+//! library threads and keep the crate dependency-free.
+//!
 //! # Built-in detectors
 //!
 //! Enabled by [`Redactor::new`]:
@@ -75,15 +79,22 @@ extern crate alloc;
 
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+#[cfg(feature = "parallel")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod detectors;
 mod types;
 
 pub use detectors::{Detector, FnDetector};
 pub use types::{Kind, Match};
+
+#[cfg(feature = "parallel")]
+const PARALLEL_INPUT_THRESHOLD: usize = 256 * 1024;
 
 /// How a matched span is rewritten in the cleaned output.
 #[derive(Debug, Clone, Default)]
@@ -206,14 +217,23 @@ impl Redactor {
     /// Find all matches in `input`, sorted by position with overlaps resolved
     /// (longer / earlier matches win). Does not modify the input.
     pub fn find(&self, input: &str) -> Vec<Match> {
-        let mut raw: Vec<(usize, Match)> = Vec::new();
-        let mut buf = Vec::new();
-        for (priority, d) in self.detectors.iter().enumerate() {
-            buf.clear();
-            d.detect(input, &mut buf);
-            raw.extend(buf.drain(..).map(|m| (priority, m)));
+        resolve_overlaps(self.find_raw(input))
+    }
+
+    /// Find all matches using detector-level parallelism for large inputs.
+    ///
+    /// The worker count is derived from the available CPU parallelism while
+    /// leaving one CPU available for the caller's other work. Small inputs and
+    /// configurations with fewer than two workers or detectors automatically
+    /// use the serial path. Match ordering and overlap resolution are identical
+    /// to [`find`](Self::find).
+    #[cfg(feature = "parallel")]
+    pub fn find_parallel(&self, input: &str) -> Vec<Match> {
+        let workers = parallel_worker_count().min(self.detectors.len());
+        if input.len() < PARALLEL_INPUT_THRESHOLD || workers < 2 {
+            return self.find(input);
         }
-        resolve_overlaps(raw)
+        resolve_overlaps(self.find_raw_parallel(input, workers))
     }
 
     /// Return `true` if `input` contains any sensitive data.
@@ -244,12 +264,70 @@ impl Redactor {
     /// configured [`Mask`].
     pub fn clean(&self, input: &str) -> String {
         let matches = self.find(input);
+        self.render_matches(input, &matches)
+    }
+
+    /// Return a cleaned copy using detector-level parallelism for large inputs.
+    ///
+    /// This uses the same masking and overlap rules as [`clean`](Self::clean)
+    /// and automatically falls back to serial processing when parallelism would
+    /// add more overhead than useful work.
+    #[cfg(feature = "parallel")]
+    pub fn clean_parallel(&self, input: &str) -> String {
+        let matches = self.find_parallel(input);
+        self.render_matches(input, &matches)
+    }
+
+    fn find_raw(&self, input: &str) -> Vec<(usize, Match)> {
+        let mut raw = Vec::new();
+        let mut buf = Vec::new();
+        for (priority, detector) in self.detectors.iter().enumerate() {
+            buf.clear();
+            detector.detect(input, &mut buf);
+            raw.extend(buf.drain(..).map(|matched| (priority, matched)));
+        }
+        raw
+    }
+
+    #[cfg(feature = "parallel")]
+    fn find_raw_parallel(&self, input: &str, workers: usize) -> Vec<(usize, Match)> {
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                handles.push(scope.spawn(|| {
+                    let mut local = Vec::new();
+                    loop {
+                        let priority = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(detector) = self.detectors.get(priority) else {
+                            break;
+                        };
+                        let mut matches = Vec::new();
+                        detector.detect(input, &mut matches);
+                        local.extend(matches.into_iter().map(|matched| (priority, matched)));
+                    }
+                    local
+                }));
+            }
+
+            let mut raw = Vec::new();
+            for handle in handles {
+                match handle.join() {
+                    Ok(mut local) => raw.append(&mut local),
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+            raw
+        })
+    }
+
+    fn render_matches(&self, input: &str, matches: &[Match]) -> String {
         if matches.is_empty() {
             return String::from(input);
         }
         let mut out = String::with_capacity(input.len());
         let mut cursor = 0;
-        for m in &matches {
+        for m in matches {
             if m.start > cursor {
                 out.push_str(&input[cursor..m.start]);
             }
@@ -285,6 +363,13 @@ impl Redactor {
             Mask::Hash => format!("[{}:{:08x}]", m.kind.label(), fnv1a(original.as_bytes())),
         }
     }
+}
+
+#[cfg(feature = "parallel")]
+fn parallel_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().saturating_sub(1).max(1))
+        .unwrap_or(1)
 }
 
 /// All built-in **default** detectors, in priority order (earlier = higher
@@ -342,20 +427,26 @@ fn resolve_overlaps(mut matches: Vec<(usize, Match)>) -> Vec<Match> {
             .then_with(|| a.start.cmp(&b.start))
             .then_with(|| b.len().cmp(&a.len()))
     });
-    let mut kept: Vec<Match> = Vec::with_capacity(matches.len());
+    let mut kept = BTreeMap::new();
     for (_, m) in matches {
-        // Keep only matches that don't overlap anything already accepted.
-        // `kept` is maintained in start order, so a binary search locates the
-        // only two candidates that can overlap `m` -- this keeps resolution
-        // O(k log k) rather than O(k^2) on match-dense input.
-        let idx = kept.partition_point(|k| k.start <= m.start);
-        let overlaps_prev = idx > 0 && kept[idx - 1].end > m.start;
-        let overlaps_next = idx < kept.len() && m.end > kept[idx].start;
+        // The nearest accepted matches on either side are the only possible
+        // overlaps. A tree keeps both lookup and insertion O(log k), including
+        // match-dense inputs where a sorted Vec would spend O(k) shifting.
+        let overlaps_prev = kept
+            .range(..=m.start)
+            .next_back()
+            .map(|(_, previous): (&usize, &Match)| previous.end > m.start)
+            .unwrap_or(false);
+        let overlaps_next = kept
+            .range(m.start..)
+            .next()
+            .map(|(_, next)| m.end > next.start)
+            .unwrap_or(false);
         if !overlaps_prev && !overlaps_next {
-            kept.insert(idx, m);
+            kept.insert(m.start, m);
         }
     }
-    kept
+    kept.into_values().collect()
 }
 
 /// 32-bit FNV-1a -- fast, non-cryptographic, used only for [`Mask::Hash`].
@@ -366,4 +457,36 @@ fn fnv1a(bytes: &[u8]) -> u32 {
         hash = hash.wrapping_mul(0x0100_0193);
     }
     hash
+}
+
+#[cfg(all(test, feature = "parallel"))]
+mod parallel_tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    use super::*;
+
+    #[test]
+    fn parallel_raw_matches_serial_with_multiple_workers() {
+        let redactor = Redactor::new();
+        let input = "alice@example.com 203.0.113.42 AKIAIOSFODNN7EXAMPLE";
+
+        let serial = resolve_overlaps(redactor.find_raw(input));
+        let parallel = resolve_overlaps(redactor.find_raw_parallel(input, 4));
+
+        assert_eq!(parallel, serial);
+    }
+
+    #[test]
+    fn parallel_detector_panic_propagates_to_the_caller() {
+        let redactor = Redactor::empty()
+            .with_detector(FnDetector::new(Kind::Custom("PANIC"), |_, _| {
+                panic!("synthetic detector panic")
+            }));
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            redactor.find_raw_parallel("synthetic input", 2)
+        }));
+
+        assert!(result.is_err());
+    }
 }

@@ -23,6 +23,18 @@ fn bench_case(name: &str, input: &str, iterations: usize, redactor: &Redactor) {
     report(name, input.len(), iterations, bytes, start.elapsed());
 }
 
+#[cfg(feature = "parallel")]
+fn bench_parallel(name: &str, input: &str, iterations: usize, redactor: &Redactor) {
+    let start = Instant::now();
+    let mut bytes = 0usize;
+    for _ in 0..iterations {
+        let cleaned = redactor.clean_parallel(black_box(input));
+        bytes += cleaned.len();
+        black_box(cleaned);
+    }
+    report(name, input.len(), iterations, bytes, start.elapsed());
+}
+
 fn bench_check(name: &str, input: &str, iterations: usize, redactor: &Redactor) {
     let start = Instant::now();
     let mut dirty = 0usize;
@@ -60,6 +72,8 @@ fn main() {
     let pem = "before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabc123\n-----END RSA PRIVATE KEY-----\nafter";
     let large_clean = clean_line.repeat(1_000);
     let large_dirty = [dirty_line, "\n", pem, "\n"].concat().repeat(500);
+    #[cfg(feature = "parallel")]
+    let parallel_input = [clean_line.repeat(20_000), dirty_line.into()].concat();
 
     let label = Redactor::new();
     let hash = Redactor::new().mask(Mask::Hash);
@@ -76,4 +90,9 @@ fn main() {
     bench_case("dirty line / hash", dirty_line, 100_000, &hash);
     bench_check("clean line / check", clean_line, 100_000, &label);
     bench_check("dirty line / check", dirty_line, 100_000, &label);
+    #[cfg(feature = "parallel")]
+    {
+        bench_case("parallel input / serial", &parallel_input, 5, &label);
+        bench_parallel("parallel input / parallel", &parallel_input, 5, &label);
+    }
 }

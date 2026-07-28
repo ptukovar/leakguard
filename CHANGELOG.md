@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Opt-in, zero-dependency `parallel` feature with `Redactor::find_parallel` and `Redactor::clean_parallel` for detector-level parallelism on large inputs.
+
+### Fixed
+- Quadratic overlap-resolution behavior on inputs with many matches from multiple detectors.
+
 ## [0.7.0] - 2026-07-27
 
 ### Fixed
