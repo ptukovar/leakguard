@@ -47,7 +47,7 @@ fills that gap with:
 ```toml
 # Library
 [dependencies]
-leakguard = "0.7.0"
+leakguard = "0.8.0"
 ```
 
 ```sh
@@ -72,6 +72,9 @@ Redactor::new().mask(Mask::fixed(String::from("***")));
 // keep the last 4 chars: 4111 1111 1111 1111 -> ***************1111
 Redactor::new().mask(Mask::Partial { keep_last: 4, ch: '*' });
 
+// custom template formatting with uppercase {LABEL} or lowercase {label}
+Redactor::new().mask(Mask::template("<{LABEL}:{label}>"));
+
 // stable non-cryptographic fingerprint for correlation (not anonymization)
 Redactor::new().mask(Mask::Hash);
 ```
@@ -95,6 +98,43 @@ for m in s.find("email a@b.com ip 10.0.0.1") {
     println!("{} at {}..{}", m.kind, m.start, m.end);
 }
 assert!(s.is_dirty("token AKIAIOSFODNN7EXAMPLE"));
+```
+
+### Allowlist safe values and redact custom words
+
+```rust
+use leakguard::{Redactor, Kind};
+
+// Allowlist known-safe IPs or internal emails so they are not redacted
+let s = Redactor::new()
+    .ignore("10.0.0.1")
+    .ignore_list(["test@example.com", "admin@example.com"])
+    // Redact custom company names or keywords without writing a custom detector
+    .redact_literal("AcmeCorp", Kind::Custom("CLIENT"))
+    .redact_words(["ProjectX", "SuperSecret"], Kind::Custom("KEYWORD"));
+
+let clean = s.clean("Contact admin@example.com at AcmeCorp from 10.0.0.1");
+assert_eq!(clean, "Contact admin@example.com at [REDACTED:CLIENT] from 10.0.0.1");
+```
+
+### Get redaction statistics and line locations
+
+```rust
+use leakguard::Redactor;
+
+let s = Redactor::new();
+
+// Clean text while collecting summary statistics
+let (clean, stats) = s.clean_with_stats("Contact alice@example.com from 10.0.0.1");
+println!("{stats}");
+// Prints: 2 matches (31 bytes redacted)
+//           EMAIL: 1 match
+//           IPV4: 1 match
+
+// Locate matches with 1-indexed line and column numbers
+for loc in s.find_located("first line\nemail alice@example.com") {
+    println!("Found {} on line {}, col {}", loc.matched.kind, loc.line, loc.column);
+}
 ```
 
 ### Add a custom detector
@@ -125,7 +165,7 @@ scoped standard library threads:
 
 ```toml
 [dependencies]
-leakguard = { version = "0.7", features = ["parallel"] }
+leakguard = { version = "0.8", features = ["parallel"] }
 ```
 
 ```rust
@@ -150,13 +190,25 @@ tail -f app.log | leakguard
 # Redact a file to stdout, keeping last 4 chars
 leakguard --mask partial --keep 4 access.log > clean.log
 
+# Custom template masking with uppercase {LABEL} or lowercase {label}
+leakguard --mask template --template "<{LABEL}>" access.log
+
+# Ignore safe test IPs and internal test emails
+leakguard --ignore 10.0.0.1,test@example.com app.log
+
+# Redact custom company names or project keywords on the fly
+leakguard --redact-word AcmeCorp --redact-literal "CUST-9981:CUSTOMER" app.log
+
 # Only redact emails and IPv4, masking with '#'
 leakguard --only email,ipv4 --mask char --char '#' < input.txt
 
 # Redact everything except phone numbers
 leakguard --without phone app.log
 
-# Structured findings as NDJSON (one compact object per line)
+# Print redaction summary statistics to stderr after processing
+leakguard --stats app.log > clean.log
+
+# Structured findings as NDJSON (one compact object per line, including line/column)
 tail -f app.log | leakguard --json
 
 # Include the matched secret text (off by default so findings are safe to log)
@@ -165,7 +217,7 @@ leakguard --json --show-values suspect.log
 # Print supported detector names
 leakguard --list-kinds
 
-# CI guard: fail the build if a file contains secrets; print kinds/offsets to stderr
+# CI guard: fail the build if a file contains secrets; print kinds/offsets/line/col to stderr
 leakguard --check --verbose secrets-scan.txt || echo "found sensitive data!"
 ```
 
@@ -273,7 +325,7 @@ redaction on a large synthetic input.
 
 ```toml
 [dependencies]
-leakguard = { version = "0.7", default-features = false }
+leakguard = { version = "0.8", default-features = false }
 ```
 
 This drops the CLI and `std`-only conveniences but keeps the full detection and

@@ -24,12 +24,18 @@ USAGE:
     as a single block.
 
 OPTIONS:
-    --mask <MODE>     label (default) | fixed | char | partial | hash
+    --mask <MODE>     label (default) | fixed | char | partial | hash | template
+    --template <STR>  template string for --mask template (default: <{LABEL}>)
     --fixed <STR>     replacement string for --mask fixed (default: [REDACTED])
     --char <C>        fill char for char/partial masks (default: *)
     --keep <N>        characters to keep for --mask partial (default: 4;
                       clamped to at most half the match so a mask can never
                       return the value unchanged)
+    --ignore <LIST>   comma-separated list of literal strings to allowlist/skip
+    --ignore-file <F> read newline-separated allowlist strings from file <F>
+    --redact-word <W> redact specific word literal as [REDACTED:KEYWORD]
+    --redact-literal <S> redact literal with kind (e.g. AcmeCorp:CLIENT)
+    --redact-words-file <F> read newline-separated word literals from file <F>
     --only <LIST>     comma-separated kinds to detect (e.g. email,ipv4,jwt)
     --without <LIST>  comma-separated kinds to skip from the selected detectors
     --format <FMT>    output format: text (default) or json (NDJSON: one
@@ -37,6 +43,7 @@ OPTIONS:
     --json            shortcut for --format json
     --show-values     include the matched secret text in --json output
                       (omitted by default so findings can be logged safely)
+    --stats           print a summary table of redacted matches to stderr
     --check           don't print; exit 1 if any sensitive data is found
     -v, --verbose     with --check, print matched kinds and offsets to stderr
     --list-kinds      print supported kind names, then exit
@@ -139,6 +146,7 @@ fn run() -> io::Result<ExitCode> {
     let mut args = std::env::args().skip(1).peekable();
 
     let mut mask_mode = String::from("label");
+    let mut template = String::from("<{LABEL}>");
     let mut fixed = String::from("[REDACTED]");
     let mut fill = '*';
     let mut keep = 4usize;
@@ -148,6 +156,12 @@ fn run() -> io::Result<ExitCode> {
     let mut check = false;
     let mut verbose = false;
     let mut show_values = false;
+    let mut show_stats = false;
+    let mut ignore_vals: Vec<String> = Vec::new();
+    let mut ignore_files: Vec<String> = Vec::new();
+    let mut redact_words: Vec<String> = Vec::new();
+    let mut redact_literals: Vec<(String, Kind)> = Vec::new();
+    let mut redact_words_files: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -165,6 +179,7 @@ fn run() -> io::Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             "--mask" => mask_mode = next_val(&mut args, "--mask")?,
+            "--template" => template = next_val(&mut args, "--template")?,
             "--fixed" => fixed = next_val(&mut args, "--fixed")?,
             "--char" => {
                 fill = next_val(&mut args, "--char")?.chars().next().unwrap_or('*');
@@ -181,8 +196,36 @@ fn run() -> io::Result<ExitCode> {
                 &next_val(&mut args, "--without")?,
                 "--without",
             )?),
+            "--ignore" => {
+                for part in next_val(&mut args, "--ignore")?.split(',') {
+                    let trim = part.trim();
+                    if !trim.is_empty() {
+                        ignore_vals.push(trim.to_string());
+                    }
+                }
+            }
+            "--ignore-file" => ignore_files.push(next_val(&mut args, "--ignore-file")?),
+            "--redact-word" => redact_words.push(next_val(&mut args, "--redact-word")?),
+            "--redact-literal" => {
+                let spec = next_val(&mut args, "--redact-literal")?;
+                if let Some((word, kind_str)) = spec.split_once(':') {
+                    let kind = parse_kind(kind_str).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("unknown kind for --redact-literal: {kind_str}"),
+                        )
+                    })?;
+                    redact_literals.push((word.to_string(), kind));
+                } else {
+                    redact_literals.push((spec, Kind::Custom("KEYWORD")));
+                }
+            }
+            "--redact-words-file" => {
+                redact_words_files.push(next_val(&mut args, "--redact-words-file")?)
+            }
             "--check" => check = true,
             "--show-values" => show_values = true,
+            "--stats" | "--summary" => show_stats = true,
             "-v" | "--verbose" => verbose = true,
             other if other.starts_with('-') && other != "-" => {
                 return Err(io::Error::new(
@@ -203,6 +246,7 @@ fn run() -> io::Result<ExitCode> {
             ch: fill,
         },
         "hash" => Mask::Hash,
+        "template" => Mask::template(template),
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -221,10 +265,41 @@ fn run() -> io::Result<ExitCode> {
     for kind in &without {
         redactor = redactor.without(kind);
     }
+    for val in &ignore_vals {
+        redactor = redactor.ignore(val);
+    }
+    for f in &ignore_files {
+        let content = std::fs::read_to_string(f)?;
+        for line in content.lines() {
+            let trim = line.trim();
+            if !trim.is_empty() && !trim.starts_with('#') {
+                redactor = redactor.ignore(trim);
+            }
+        }
+    }
+    if !redact_words.is_empty() {
+        redactor = redactor.redact_words(&redact_words, Kind::Custom("KEYWORD"));
+    }
+    for (word, kind) in &redact_literals {
+        redactor = redactor.redact_literal(word, kind.clone());
+    }
+    for f in &redact_words_files {
+        let content = std::fs::read_to_string(f)?;
+        let words: Vec<String> = content
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(String::from)
+            .collect();
+        if !words.is_empty() {
+            redactor = redactor.redact_words(&words, Kind::Custom("KEYWORD"));
+        }
+    }
     let redactor = redactor.mask(mask);
 
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
+    let mut stats = leakguard::RedactionStats::new();
     let mut found_any = false;
 
     if files.is_empty() {
@@ -237,6 +312,8 @@ fn run() -> io::Result<ExitCode> {
             verbose,
             &format,
             show_values,
+            &mut stats,
+            show_stats,
             "<stdin>",
             &mut out,
             &mut found_any,
@@ -254,6 +331,8 @@ fn run() -> io::Result<ExitCode> {
                     verbose,
                     &format,
                     show_values,
+                    &mut stats,
+                    show_stats,
                     "<stdin>",
                     &mut out,
                     &mut found_any,
@@ -269,6 +348,8 @@ fn run() -> io::Result<ExitCode> {
                     verbose,
                     &format,
                     show_values,
+                    &mut stats,
+                    show_stats,
                     f,
                     &mut out,
                     &mut found_any,
@@ -279,6 +360,10 @@ fn run() -> io::Result<ExitCode> {
     }
 
     out.flush()?;
+    if show_stats {
+        eprintln!("=== leakguard redaction summary ===");
+        eprintln!("{}", stats);
+    }
     if check && found_any {
         return Ok(ExitCode::from(1));
     }
@@ -292,6 +377,9 @@ struct ProcessCtx<'a, W: Write> {
     verbose: bool,
     format: &'a str,
     show_values: bool,
+    stats: &'a mut leakguard::RedactionStats,
+    show_stats: bool,
+    current_line: usize,
     source: &'a str,
     out: &'a mut W,
     found_any: &'a mut bool,
@@ -306,6 +394,8 @@ impl<'a, W: Write> ProcessCtx<'a, W> {
         verbose: bool,
         format: &'a str,
         show_values: bool,
+        stats: &'a mut leakguard::RedactionStats,
+        show_stats: bool,
         source: &'a str,
         out: &'a mut W,
         found_any: &'a mut bool,
@@ -317,6 +407,9 @@ impl<'a, W: Write> ProcessCtx<'a, W> {
             verbose,
             format,
             show_values,
+            stats,
+            show_stats,
+            current_line: 1,
             source,
             out,
             found_any,
@@ -393,12 +486,17 @@ fn process_reader<R: BufRead, W: Write>(
 }
 
 fn process_chunk<W: Write>(input: &str, ctx: &mut ProcessCtx<'_, W>) -> io::Result<()> {
-    let matches = ctx.redactor.find(input);
-    if !matches.is_empty() {
+    let located = ctx.redactor.find_located(input);
+    if !located.is_empty() {
         *ctx.found_any = true;
     }
+    if ctx.show_stats {
+        for loc in &located {
+            ctx.stats.record(&loc.matched);
+        }
+    }
     if ctx.format == "json" {
-        if !matches.is_empty() || !ctx.check {
+        if !located.is_empty() || !ctx.check {
             // NDJSON: exactly one compact object per input chunk, so the output
             // stays streamable (`tail -f`) and greppable, and each line parses
             // independently.
@@ -407,15 +505,19 @@ fn process_chunk<W: Write>(input: &str, ctx: &mut ProcessCtx<'_, W>) -> io::Resu
             json.push_str("\"source\":");
             json.push_str(&json_escape(ctx.source));
             json.push_str(",\"matches\":[");
-            for (idx, m) in matches.iter().enumerate() {
+            for (idx, loc) in located.iter().enumerate() {
+                let m = &loc.matched;
                 if idx > 0 {
                     json.push(',');
                 }
+                let file_line = ctx.current_line - 1 + loc.line;
                 json.push_str(&format!(
-                    "{{\"kind\":\"{}\",\"start\":{},\"end\":{}",
+                    "{{\"kind\":\"{}\",\"start\":{},\"end\":{},\"line\":{},\"column\":{}",
                     m.kind.label(),
                     m.start,
-                    m.end
+                    m.end,
+                    file_line,
+                    loc.column
                 ));
                 // The matched text is a secret: only emit it when explicitly
                 // requested, never by default and never merely because
@@ -430,17 +532,20 @@ fn process_chunk<W: Write>(input: &str, ctx: &mut ProcessCtx<'_, W>) -> io::Resu
             ctx.out.write_all(json.as_bytes())?;
         }
     } else if ctx.check {
-        if !matches.is_empty() && ctx.verbose {
-            for m in matches {
+        if !located.is_empty() && ctx.verbose {
+            for loc in located {
+                let m = &loc.matched;
+                let file_line = ctx.current_line - 1 + loc.line;
                 eprintln!(
-                    "leakguard: {}: found {} at {}..{}",
-                    ctx.source, m.kind, m.start, m.end
+                    "leakguard: {}: line {}: col {}: found {} at {}..{}",
+                    ctx.source, file_line, loc.column, m.kind, m.start, m.end
                 );
             }
         }
     } else {
         ctx.out.write_all(ctx.redactor.clean(input).as_bytes())?;
     }
+    ctx.current_line += input.bytes().filter(|&b| b == b'\n').count();
     Ok(())
 }
 

@@ -6,8 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-31
+
 ### Added
 - Opt-in, zero-dependency `parallel` feature with `Redactor::find_parallel` and `Redactor::clean_parallel` for detector-level parallelism on large inputs.
+- Allowlist and ignore rules with `Redactor::ignore`, `Redactor::ignore_list`, and `Redactor::is_ignored`, plus CLI flags `--ignore <LIST>` and `--ignore-file <FILE>` to skip allowlisted strings without redacting them.
+- Literal keyword and phrase redaction with `Redactor::redact_literal` and `Redactor::redact_words`, plus CLI flags `--redact-word <WORD>`, `--redact-literal <WORD:KIND>`, and `--redact-words-file <FILE>` to redact custom literal terms without writing detector code.
+- `Mask::Template` (and `Mask::template("<{LABEL}>")`) to format redaction tags using `{LABEL}` / `{label}` / `{KIND}` / `{kind}` placeholders, plus CLI `--mask template --template "<{LABEL}>"`.
+- Match line and column tracking with `LocatedMatch` and `Redactor::find_located` (`Redactor::find_located_parallel`), reporting 1-indexed line numbers and UTF-8 character column offsets.
+- CLI `--json` output and `--check --verbose` output now include 1-indexed line numbers (`line`) and column offsets (`column`) for every finding.
+- Redaction statistics and reporting with `RedactionStats`, `Redactor::stats`, and `Redactor::clean_with_stats` (`clean_iter_with_stats`), plus CLI `--stats` / `--summary` to print a structured summary table of redacted matches to stderr.
 
 ### Fixed
 - Quadratic overlap-resolution behavior on inputs with many matches from multiple detectors.
@@ -120,7 +128,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `leakguard` CLI for redacting stdin/files, with a `--check` mode for CI guards.
 - `redact_logs` example and an integration test suite.
 
-[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/ptukovar/leakguard/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ptukovar/leakguard/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/ptukovar/leakguard/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/ptukovar/leakguard/compare/v0.5.0...v0.6.0

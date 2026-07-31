@@ -6,6 +6,7 @@
 
 use crate::types::{Kind, Match};
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// A pluggable rule that finds sensitive spans in text.
@@ -1360,6 +1361,53 @@ impl Detector for DiscordToken {
                 }
             }
             i += 1;
+        }
+    }
+}
+
+/// A detector that matches exact literal words or phrases on UTF-8 character boundaries.
+///
+/// Created via [`crate::Redactor::redact_literal`] or [`crate::Redactor::redact_words`].
+#[derive(Debug, Clone)]
+pub struct LiteralDetector {
+    words: Vec<alloc::string::String>,
+    kind: Kind,
+}
+
+impl LiteralDetector {
+    /// Create a new literal detector matching the given words and reporting as `kind`.
+    pub fn new<I, S>(words: I, kind: Kind) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self {
+            words: words
+                .into_iter()
+                .map(|s| String::from(s.as_ref()))
+                .collect(),
+            kind,
+        }
+    }
+}
+
+impl Detector for LiteralDetector {
+    fn kind(&self) -> Kind {
+        self.kind.clone()
+    }
+
+    fn detect(&self, input: &str, out: &mut Vec<Match>) {
+        for word in &self.words {
+            if word.is_empty() {
+                continue;
+            }
+            let mut from = 0;
+            while let Some(idx) = input[from..].find(word.as_str()) {
+                let start = from + idx;
+                let end = start + word.len();
+                out.push(Match::new(self.kind.clone(), start, end));
+                from = end;
+            }
         }
     }
 }

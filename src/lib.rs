@@ -90,8 +90,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 pub mod detectors;
 mod types;
 
-pub use detectors::{Detector, FnDetector};
-pub use types::{Kind, Match};
+pub use detectors::{Detector, FnDetector, LiteralDetector};
+pub use types::{Kind, LocatedMatch, Match, RedactionStats};
 
 #[cfg(feature = "parallel")]
 const PARALLEL_INPUT_THRESHOLD: usize = 256 * 1024;
@@ -127,6 +127,17 @@ pub enum Mask {
     /// values stay equal. This is intended for correlation, **not** for
     /// anonymization or security against guessing/dictionary attacks.
     Hash,
+    /// Replace each match using a template string where `{LABEL}` or `{KIND}` is
+    /// replaced with the uppercase kind label (e.g. `EMAIL`) and `{label}` or
+    /// `{kind}` is replaced with the lowercase label (`email`).
+    ///
+    /// ```
+    /// use leakguard::{Mask, Redactor};
+    ///
+    /// let r = Redactor::new().mask(Mask::template("<{LABEL}>"));
+    /// assert_eq!(r.clean("ip 10.0.0.1"), "ip <IPV4>");
+    /// ```
+    Template(Cow<'static, str>),
 }
 
 impl Mask {
@@ -145,12 +156,32 @@ impl Mask {
     {
         Self::Fixed(s.into())
     }
+
+    /// Build a template mask from either a string literal or an owned string.
+    ///
+    /// Placeholders `{LABEL}` or `{KIND}` are replaced with the uppercase kind
+    /// label (e.g. `EMAIL`), while `{label}` / `{kind}` are replaced with
+    /// lowercase (`email`).
+    ///
+    /// ```
+    /// use leakguard::{Mask, Redactor};
+    ///
+    /// let tmpl = Redactor::new().mask(Mask::template("<{LABEL}>"));
+    /// # let _ = tmpl;
+    /// ```
+    pub fn template<S>(s: S) -> Self
+    where
+        S: Into<Cow<'static, str>>,
+    {
+        Self::Template(s.into())
+    }
 }
 
 /// The main entry point: configure detectors + a [`Mask`], then [`clean`](Redactor::clean).
 pub struct Redactor {
     detectors: Vec<Box<dyn Detector>>,
     mask: Mask,
+    ignored: Vec<String>,
 }
 
 impl Default for Redactor {
@@ -166,6 +197,7 @@ impl Redactor {
         Self {
             detectors: default_detectors(),
             mask: Mask::Label,
+            ignored: Vec::new(),
         }
     }
 
@@ -175,6 +207,7 @@ impl Redactor {
         Self {
             detectors: Vec::new(),
             mask: Mask::Label,
+            ignored: Vec::new(),
         }
     }
 
@@ -193,12 +226,63 @@ impl Redactor {
         Self {
             detectors,
             mask: Mask::Label,
+            ignored: Vec::new(),
         }
     }
 
     /// Set the masking strategy (builder style).
     pub fn mask(mut self, mask: Mask) -> Self {
         self.mask = mask;
+        self
+    }
+
+    /// Ignore matches whose text equals the given literal value (builder style).
+    ///
+    /// Matches on the allowlist are skipped by all detection and redaction
+    /// methods ([`find`](Self::find), [`clean`](Self::clean),
+    /// [`is_dirty`](Self::is_dirty), and their parallel equivalents).
+    pub fn ignore<S: AsRef<str>>(mut self, value: S) -> Self {
+        self.ignored.push(String::from(value.as_ref()));
+        self
+    }
+
+    /// Ignore matches whose text equals any literal value in `values` (builder style).
+    pub fn ignore_list<I, S>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for val in values {
+            self.ignored.push(String::from(val.as_ref()));
+        }
+        self
+    }
+
+    /// Return `true` if `text` is on this redactor's allowlist.
+    pub fn is_ignored(&self, text: &str) -> bool {
+        self.ignored.iter().any(|s| s == text)
+    }
+
+    /// Add a literal word or phrase detector (builder style).
+    ///
+    /// Any occurrence of `word` in the input will be detected as `kind`.
+    /// Literal detectors take priority over default built-in detectors on overlaps.
+    pub fn redact_literal<S: AsRef<str>>(mut self, word: S, kind: Kind) -> Self {
+        self.detectors
+            .insert(0, Box::new(detectors::LiteralDetector::new([word], kind)));
+        self
+    }
+
+    /// Add multiple literal words or phrases to be detected as `kind` (builder style).
+    ///
+    /// Literal detectors take priority over default built-in detectors on overlaps.
+    pub fn redact_words<I, S>(mut self, words: I, kind: Kind) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.detectors
+            .insert(0, Box::new(detectors::LiteralDetector::new(words, kind)));
         self
     }
 
@@ -220,6 +304,47 @@ impl Redactor {
         resolve_overlaps(self.find_raw(input))
     }
 
+    /// Find all matches in `input`, returning them with 1-indexed line and
+    /// UTF-8 character column positions.
+    pub fn find_located(&self, input: &str) -> Vec<LocatedMatch> {
+        locate_matches(input, self.find(input))
+    }
+
+    /// Return statistics summarizing the matches found in `input`.
+    pub fn stats(&self, input: &str) -> RedactionStats {
+        let matches = self.find(input);
+        let mut stats = RedactionStats::new();
+        stats.record_all(&matches);
+        stats
+    }
+
+    /// Return both the cleaned string and statistics summarizing what was redacted.
+    pub fn clean_with_stats(&self, input: &str) -> (String, RedactionStats) {
+        let matches = self.find(input);
+        let mut stats = RedactionStats::new();
+        stats.record_all(&matches);
+        let cleaned = self.render_matches(input, &matches);
+        (cleaned, stats)
+    }
+
+    /// Return a vector of cleaned copies along with combined statistics for an iterator of input strings.
+    pub fn clean_iter_with_stats<I, S>(&self, inputs: I) -> (Vec<String>, RedactionStats)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut stats = RedactionStats::new();
+        let cleaned = inputs
+            .into_iter()
+            .map(|s| {
+                let (c, s_chunk) = self.clean_with_stats(s.as_ref());
+                stats.merge(&s_chunk);
+                c
+            })
+            .collect();
+        (cleaned, stats)
+    }
+
     /// Find all matches using detector-level parallelism for large inputs.
     ///
     /// The worker count is derived from the available CPU parallelism while
@@ -236,6 +361,32 @@ impl Redactor {
         resolve_overlaps(self.find_raw_parallel(input, workers))
     }
 
+    /// Find all matches using detector-level parallelism, returning them with
+    /// 1-indexed line and UTF-8 character column positions.
+    #[cfg(feature = "parallel")]
+    pub fn find_located_parallel(&self, input: &str) -> Vec<LocatedMatch> {
+        locate_matches(input, self.find_parallel(input))
+    }
+
+    /// Return statistics summarizing the matches found in `input` using detector-level parallelism.
+    #[cfg(feature = "parallel")]
+    pub fn stats_parallel(&self, input: &str) -> RedactionStats {
+        let matches = self.find_parallel(input);
+        let mut stats = RedactionStats::new();
+        stats.record_all(&matches);
+        stats
+    }
+
+    /// Return both the cleaned string and statistics using detector-level parallelism.
+    #[cfg(feature = "parallel")]
+    pub fn clean_with_stats_parallel(&self, input: &str) -> (String, RedactionStats) {
+        let matches = self.find_parallel(input);
+        let mut stats = RedactionStats::new();
+        stats.record_all(&matches);
+        let cleaned = self.render_matches(input, &matches);
+        (cleaned, stats)
+    }
+
     /// Return `true` if `input` contains any sensitive data.
     ///
     /// Short-circuits on the first detector that reports a match and reuses a
@@ -245,7 +396,14 @@ impl Redactor {
         for d in &self.detectors {
             v.clear();
             d.detect(input, &mut v);
-            if !v.is_empty() {
+            if self.ignored.is_empty() {
+                if !v.is_empty() {
+                    return true;
+                }
+            } else if v
+                .iter()
+                .any(|matched| !self.is_ignored(matched.text(input)))
+            {
                 return true;
             }
         }
@@ -284,7 +442,11 @@ impl Redactor {
         for (priority, detector) in self.detectors.iter().enumerate() {
             buf.clear();
             detector.detect(input, &mut buf);
-            raw.extend(buf.drain(..).map(|matched| (priority, matched)));
+            raw.extend(
+                buf.drain(..)
+                    .filter(|matched| !self.is_ignored(matched.text(input)))
+                    .map(|matched| (priority, matched)),
+            );
         }
         raw
     }
@@ -304,7 +466,12 @@ impl Redactor {
                         };
                         let mut matches = Vec::new();
                         detector.detect(input, &mut matches);
-                        local.extend(matches.into_iter().map(|matched| (priority, matched)));
+                        local.extend(
+                            matches
+                                .into_iter()
+                                .filter(|matched| !self.is_ignored(matched.text(input)))
+                                .map(|matched| (priority, matched)),
+                        );
                     }
                     local
                 }));
@@ -361,6 +528,32 @@ impl Redactor {
                 s
             }
             Mask::Hash => format!("[{}:{:08x}]", m.kind.label(), fnv1a(original.as_bytes())),
+            Mask::Template(tmpl) => {
+                let label_upper = m.kind.label();
+                let mut out = String::with_capacity(tmpl.len() + label_upper.len());
+                let mut rest = tmpl.as_ref();
+                while let Some(idx) = rest.find('{') {
+                    out.push_str(&rest[..idx]);
+                    rest = &rest[idx..];
+                    if let Some(end) = rest.find('}') {
+                        let token = &rest[1..end];
+                        match token {
+                            "LABEL" | "KIND" => out.push_str(label_upper),
+                            "label" | "kind" => {
+                                for c in label_upper.chars() {
+                                    out.push(c.to_ascii_lowercase());
+                                }
+                            }
+                            _ => out.push_str(&rest[..=end]),
+                        }
+                        rest = &rest[end + 1..];
+                    } else {
+                        break;
+                    }
+                }
+                out.push_str(rest);
+                out
+            }
         }
     }
 }
@@ -447,6 +640,35 @@ fn resolve_overlaps(mut matches: Vec<(usize, Match)>) -> Vec<Match> {
         }
     }
     kept.into_values().collect()
+}
+
+/// Compute 1-indexed line and UTF-8 character column numbers for sorted [`Match`]es in `input`.
+fn locate_matches(input: &str, matches: Vec<Match>) -> Vec<LocatedMatch> {
+    if matches.is_empty() {
+        return Vec::new();
+    }
+    let mut located = Vec::with_capacity(matches.len());
+    let mut current_line = 1usize;
+    let mut line_start_byte = 0usize;
+    let mut last_scanned_byte = 0usize;
+
+    for m in matches {
+        for (i, b) in input[last_scanned_byte..m.start].bytes().enumerate() {
+            if b == b'\n' {
+                current_line += 1;
+                line_start_byte = last_scanned_byte + i + 1;
+            }
+        }
+        last_scanned_byte = m.start;
+
+        let col = input[line_start_byte..m.start].chars().count() + 1;
+        located.push(LocatedMatch {
+            matched: m,
+            line: current_line,
+            column: col,
+        });
+    }
+    located
 }
 
 /// 32-bit FNV-1a -- fast, non-cryptographic, used only for [`Mask::Hash`].

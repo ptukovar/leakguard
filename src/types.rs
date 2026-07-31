@@ -1,12 +1,13 @@
 //! Core data types: [`Kind`] and [`Match`].
 
+use alloc::collections::BTreeMap;
 use core::fmt;
 
 /// The category of sensitive data a detector matched.
 ///
 /// This list is intentionally open-ended via [`Kind::Custom`] so users can plug
 /// in their own detectors without forking the crate.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Kind {
     /// An email address, e.g. `alice@example.com`.
@@ -127,5 +128,95 @@ impl Match {
     /// Panics if the match does not belong to `input` (offsets out of range).
     pub fn text<'a>(&self, input: &'a str) -> &'a str {
         &input[self.start..self.end]
+    }
+}
+
+/// A [`Match`] together with its 1-indexed line number and UTF-8 character column in the input text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedMatch {
+    /// The matched sensitive span.
+    pub matched: Match,
+    /// 1-indexed line number where the match begins.
+    pub line: usize,
+    /// 1-indexed column number (in UTF-8 characters) on that line where the match begins.
+    pub column: usize,
+}
+
+impl LocatedMatch {
+    /// Create a new located match.
+    pub fn new(matched: Match, line: usize, column: usize) -> Self {
+        Self {
+            matched,
+            line,
+            column,
+        }
+    }
+}
+
+/// Statistics summarizing the sensitive matches found and redacted by a
+/// [`Redactor`](crate::Redactor).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RedactionStats {
+    /// Total number of sensitive matches detected.
+    pub total_matches: usize,
+    /// Total number of bytes in the input text that were covered by matches.
+    pub bytes_redacted: usize,
+    /// Number of matches found for each category of sensitive data ([`Kind`]).
+    pub by_kind: BTreeMap<Kind, usize>,
+}
+
+impl RedactionStats {
+    /// Create a new, empty statistics summary.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether any matches were recorded.
+    pub fn is_empty(&self) -> bool {
+        self.total_matches == 0
+    }
+
+    /// Record a single match in these statistics.
+    pub fn record(&mut self, m: &Match) {
+        self.total_matches += 1;
+        self.bytes_redacted += m.len();
+        *self.by_kind.entry(m.kind.clone()).or_insert(0) += 1;
+    }
+
+    /// Record a slice of matches in these statistics.
+    pub fn record_all(&mut self, matches: &[Match]) {
+        for m in matches {
+            self.record(m);
+        }
+    }
+
+    /// Merge another `RedactionStats` into this one.
+    pub fn merge(&mut self, other: &RedactionStats) {
+        self.total_matches += other.total_matches;
+        self.bytes_redacted += other.bytes_redacted;
+        for (kind, count) in &other.by_kind {
+            *self.by_kind.entry(kind.clone()).or_insert(0) += *count;
+        }
+    }
+}
+
+impl fmt::Display for RedactionStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} match{} ({} byte{} redacted)",
+            self.total_matches,
+            if self.total_matches == 1 { "" } else { "es" },
+            self.bytes_redacted,
+            if self.bytes_redacted == 1 { "" } else { "s" },
+        )?;
+        for (kind, count) in &self.by_kind {
+            write!(
+                f,
+                "\n  {kind}: {count} match{}",
+                if *count == 1 { "" } else { "es" }
+            )?;
+        }
+        Ok(())
     }
 }

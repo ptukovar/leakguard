@@ -110,6 +110,7 @@ fn fuzz_style_generated_inputs_keep_match_offsets_valid() {
             ch: '*',
         }),
         Redactor::new().mask(Mask::Hash),
+        Redactor::new().mask(Mask::template("<{LABEL}:{label}>")),
     ];
 
     for seed in 0..1_000u64 {
