@@ -252,6 +252,39 @@ fn openai_keys() {
 }
 
 #[test]
+fn every_multi_prefix_token_variant_is_detected() {
+    for (kind, prefix, body_len) in [
+        (Kind::GitHubToken, "github_pat_", 20),
+        (Kind::GitHubToken, "ghp_", 30),
+        (Kind::GitHubToken, "gho_", 30),
+        (Kind::GitHubToken, "ghu_", 30),
+        (Kind::GitHubToken, "ghs_", 30),
+        (Kind::GitHubToken, "ghr_", 30),
+        (Kind::SlackToken, "xoxb-", 10),
+        (Kind::SlackToken, "xoxp-", 10),
+        (Kind::SlackToken, "xoxa-", 10),
+        (Kind::SlackToken, "xoxr-", 10),
+        (Kind::SlackToken, "xoxs-", 10),
+        (Kind::SlackToken, "xoxo-", 10),
+        (Kind::StripeKey, "sk_live_", 10),
+        (Kind::StripeKey, "sk_test_", 10),
+        (Kind::StripeKey, "rk_live_", 10),
+        (Kind::StripeKey, "rk_test_", 10),
+        (Kind::StripeKey, "pk_live_", 10),
+        (Kind::StripeKey, "pk_test_", 10),
+        (Kind::OpenAiKey, "sk-proj-", 20),
+        (Kind::OpenAiKey, "sk-", 20),
+    ] {
+        let secret = format!("{prefix}{}", "a".repeat(body_len));
+        let redactor = Redactor::only(core::slice::from_ref(&kind));
+        let matches = redactor.find(&secret);
+        assert_eq!(matches.len(), 1, "prefix: {prefix}");
+        assert_eq!(matches[0].kind, kind, "prefix: {prefix}");
+        assert_eq!(matches[0].text(&secret), secret, "prefix: {prefix}");
+    }
+}
+
+#[test]
 fn private_key_block() {
     let s = Redactor::only(&[Kind::PrivateKey]);
     let pem = "before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nabc123\n-----END RSA PRIVATE KEY-----\nafter";
