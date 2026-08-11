@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-11
+
+### Changed
+- Multi-prefix token detectors now scan once per kind with a first-byte pre-filter
+  (`possible_start[256]`), replacing 20 full-input passes with 4: `GitHubToken`
+  (6 → 1), `SlackToken` (6 → 1), `StripeKey` (6 → 1), `OpenAiKey` (2 → 1).
+  Synthetic 8 MiB clean JSON on Xeon 8488C (PR #4): full credential set serial
+  17.6 → 93.4 MiB/s, parallel 70.8 → 316.5 MiB/s, four callers 172.4 → 552.2 MiB/s;
+  per-detector GitHub 64.9 → 2,275.9 MiB/s, Slack 65.0 → 2,326.8 MiB/s,
+  Stripe 63.6 → 2,237.4 MiB/s, OpenAI 189.7 → 2,339.3 MiB/s.
+
+### Added
+- Synthetic coverage for every multi-prefix variant (20 fixtures: `github_pat_`,
+  `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `xoxb-`/`xoxp-`/`xoxa-`/`xoxr-`/`xoxs-`/`xoxo-`,
+  `sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`/`pk_live_`/`pk_test_`, `sk-proj-`/`sk-`)
+  in `every_multi_prefix_token_variant_is_detected` to prevent regressions.
+
 ## [0.8.0] - 2026-07-31
 
 ### Added
