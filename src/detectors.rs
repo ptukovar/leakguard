@@ -707,6 +707,49 @@ fn scan_prefixed(
     }
 }
 
+/// Scan once for several prefixes that share a detector kind. Prefix order is
+/// priority order: when multiple valid prefixes begin at the same byte, the
+/// first one wins.
+fn scan_prefixed_any(
+    input: &str,
+    prefixes: &[(&str, usize, usize)],
+    kind: Kind,
+    out: &mut Vec<Match>,
+) {
+    let b = input.as_bytes();
+    let mut possible_start = [false; 256];
+    for &(prefix, _, _) in prefixes {
+        if let Some(first) = prefix.as_bytes().first() {
+            possible_start[usize::from(*first)] = true;
+        }
+    }
+    let mut i = 0;
+    while i < b.len() {
+        if !possible_start[usize::from(b[i])] {
+            i += 1;
+            continue;
+        }
+        let mut matched_end = None;
+        for &(prefix, min_body, max_body) in prefixes {
+            let pb = prefix.as_bytes();
+            let Some(prefix_end) = i.checked_add(pb.len()) else {
+                continue;
+            };
+            if prefix_end > b.len() || &b[i..prefix_end] != pb || !bounded_left_relaxed(b, i) {
+                continue;
+            }
+            let body_end = run(b, prefix_end, is_token_char);
+            let body_len = body_end - prefix_end;
+            if body_len >= min_body && body_len <= max_body {
+                out.push(Match::new(kind.clone(), i, body_end));
+                matched_end = Some(body_end);
+                break;
+            }
+        }
+        i = matched_end.unwrap_or(i + 1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GitHub tokens
 // ---------------------------------------------------------------------------
@@ -722,11 +765,20 @@ impl Detector for GitHubToken {
     }
 
     fn detect(&self, input: &str, out: &mut Vec<Match>) {
-        // Fine-grained PATs are longer; check them first so the longer match wins.
-        scan_prefixed(input, "github_pat_", 20, 200, Kind::GitHubToken, out);
-        for p in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"] {
-            scan_prefixed(input, p, 30, 255, Kind::GitHubToken, out);
-        }
+        scan_prefixed_any(
+            input,
+            &[
+                // Fine-grained PATs are longer; check them first so the longer match wins.
+                ("github_pat_", 20, 200),
+                ("ghp_", 30, 255),
+                ("gho_", 30, 255),
+                ("ghu_", 30, 255),
+                ("ghs_", 30, 255),
+                ("ghr_", 30, 255),
+            ],
+            Kind::GitHubToken,
+            out,
+        );
     }
 }
 
@@ -743,9 +795,19 @@ impl Detector for SlackToken {
     }
 
     fn detect(&self, input: &str, out: &mut Vec<Match>) {
-        for p in ["xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-", "xoxo-"] {
-            scan_prefixed(input, p, 10, 255, Kind::SlackToken, out);
-        }
+        scan_prefixed_any(
+            input,
+            &[
+                ("xoxb-", 10, 255),
+                ("xoxp-", 10, 255),
+                ("xoxa-", 10, 255),
+                ("xoxr-", 10, 255),
+                ("xoxs-", 10, 255),
+                ("xoxo-", 10, 255),
+            ],
+            Kind::SlackToken,
+            out,
+        );
     }
 }
 
@@ -763,11 +825,19 @@ impl Detector for StripeKey {
     }
 
     fn detect(&self, input: &str, out: &mut Vec<Match>) {
-        for p in [
-            "sk_live_", "sk_test_", "rk_live_", "rk_test_", "pk_live_", "pk_test_",
-        ] {
-            scan_prefixed(input, p, 10, 255, Kind::StripeKey, out);
-        }
+        scan_prefixed_any(
+            input,
+            &[
+                ("sk_live_", 10, 255),
+                ("sk_test_", 10, 255),
+                ("rk_live_", 10, 255),
+                ("rk_test_", 10, 255),
+                ("pk_live_", 10, 255),
+                ("pk_test_", 10, 255),
+            ],
+            Kind::StripeKey,
+            out,
+        );
     }
 }
 
@@ -817,9 +887,16 @@ impl Detector for OpenAiKey {
     }
 
     fn detect(&self, input: &str, out: &mut Vec<Match>) {
-        // Project keys (`sk-proj-...`) first so the longer prefix wins on overlap.
-        scan_prefixed(input, "sk-proj-", 20, 255, Kind::OpenAiKey, out);
-        scan_prefixed(input, "sk-", 20, 255, Kind::OpenAiKey, out);
+        scan_prefixed_any(
+            input,
+            &[
+                // Project keys (`sk-proj-...`) first so the longer prefix wins on overlap.
+                ("sk-proj-", 20, 255),
+                ("sk-", 20, 255),
+            ],
+            Kind::OpenAiKey,
+            out,
+        );
     }
 }
 
