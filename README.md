@@ -47,7 +47,7 @@ fills that gap with:
 ```toml
 # Library
 [dependencies]
-leakguard = "0.9.0"
+leakguard = "0.9.1"
 ```
 
 ```sh

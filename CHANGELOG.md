@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-01
+
+### Fixed
+- MSRV 1.70.0 clippy::box-default lint with Box::<HighEntropy>::default()
+- cargo fmt formatting drift on CI
+
 ## [0.9.0] - 2026-09-01
 
 ### Added
@@ -200,7 +206,8 @@ This is the last minor release before 1.0.0. The public API is frozen after
 - `leakguard` CLI for redacting stdin/files, with a `--check` mode for CI guards.
 - `redact_logs` example and an integration test suite.
 
-[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/ptukovar/leakguard/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ptukovar/leakguard/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/ptukovar/leakguard/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ptukovar/leakguard/compare/v0.7.0...v0.8.0
