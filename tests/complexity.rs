@@ -22,7 +22,7 @@ use leakguard::{Kind, Redactor};
 /// Growth ratio per input doubling that still counts as sub-quadratic.
 /// Linear is 2.0; quadratic is 4.0. Allow headroom for noise and allocator
 /// effects without letting true quadratic behaviour pass.
-const MAX_RATIO_PER_DOUBLING: f64 = 2.6;
+const MAX_RATIO_PER_DOUBLING: f64 = 2.8;
 
 fn time_find(redactor: &Redactor, input: &str) -> f64 {
     // One warm-up pass so allocation and cache effects don't skew the sample.

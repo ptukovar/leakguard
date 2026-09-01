@@ -13,6 +13,11 @@ use alloc::vec::Vec;
 ///
 /// Implement this trait to add your own detector and register it with
 /// [`crate::Redactor::with_detector`].
+///
+/// This trait is **open** (not sealed) on purpose: custom detectors are a
+/// supported extension point. As of 0.9.0 the trait is part of the frozen
+/// public API; any method added in the future will ship with a default
+/// implementation so existing implementors keep compiling.
 pub trait Detector: Send + Sync {
     /// The kind of data this detector produces.
     fn kind(&self) -> Kind;
@@ -677,6 +682,12 @@ fn bounded_right(b: &[u8], end: usize) -> bool {
 /// Generic prefix scanner: finds `prefix` (when properly bounded) followed by a
 /// run of token chars, and emits a match if the body length is within
 /// `min_body..=max_body`. The match span covers the prefix + body.
+///
+/// Detection is linear even when the prefix repeats densely inside one long
+/// token-character run (`ghp_ghp_ghp_...`): every occurrence inside that run
+/// shares the same run end, so a body that overruns `max_body` triggers a jump
+/// to the first position where a shorter body could still be valid instead of
+/// re-walking the run once per occurrence.
 fn scan_prefixed(
     input: &str,
     prefix: &str,
@@ -694,12 +705,18 @@ fn scan_prefixed(
     let mut i = 0;
     while i + plen <= b.len() {
         if &b[i..i + plen] == pb && bounded_left_relaxed(b, i) {
-            let body_start = i + plen;
-            let body_end = run(b, body_start, is_token_char);
-            let body_len = body_end - body_start;
-            if body_len >= min_body && body_len <= max_body {
+            let body_end = run(b, i + plen, is_token_char);
+            let body_len = body_end - (i + plen);
+            if (min_body..=max_body).contains(&body_len) {
                 out.push(Match::new(kind.clone(), i, body_end));
                 i = body_end;
+                continue;
+            }
+            if body_len > max_body {
+                // Any valid occurrence must start within `max_body + plen` of
+                // this run's end (see `scan_prefixed_any` for the derivation);
+                // jump there instead of re-walking the run per occurrence.
+                i = body_end.saturating_sub(max_body + plen).max(i + 1);
                 continue;
             }
         }
@@ -710,6 +727,13 @@ fn scan_prefixed(
 /// Scan once for several prefixes that share a detector kind. Prefix order is
 /// priority order: when multiple valid prefixes begin at the same byte, the
 /// first one wins.
+///
+/// Linear even on adversarial inputs: the first matching prefix fixes the end
+/// of the enclosing token-character run, and that run end is reused by every
+/// prefix tried at the same byte. If the body overruns every prefix's `max_body`
+/// (`ghp_` repeated thousands of times inside one run), scanning jumps to the
+/// first byte where a shorter body could still be valid rather than re-walking
+/// the same run once per occurrence -- which was quadratic.
 fn scan_prefixed_any(
     input: &str,
     prefixes: &[(&str, usize, usize)],
@@ -723,13 +747,25 @@ fn scan_prefixed_any(
             possible_start[usize::from(*first)] = true;
         }
     }
+    // A match starting at `s` inside a token run that ends at `run_end` is
+    // valid for prefix p only if `run_end - s - p.len() <= p.max_body`, i.e.
+    // `s >= run_end - (p.max_body + p.len())`. The maximum of that window over
+    // all prefixes bounds how far back scanning must resume after a too-long
+    // body; positions before it can only fail the upper length bound.
+    let resume_window = prefixes
+        .iter()
+        .map(|&(prefix, _, max_body)| max_body + prefix.len())
+        .max()
+        .unwrap_or(0);
     let mut i = 0;
     while i < b.len() {
         if !possible_start[usize::from(b[i])] {
             i += 1;
             continue;
         }
-        let mut matched_end = None;
+        let mut i_next = i + 1;
+        let mut run_end: Option<usize> = None;
+        let mut too_long = false;
         for &(prefix, min_body, max_body) in prefixes {
             let pb = prefix.as_bytes();
             let Some(prefix_end) = i.checked_add(pb.len()) else {
@@ -738,15 +774,36 @@ fn scan_prefixed_any(
             if prefix_end > b.len() || &b[i..prefix_end] != pb || !bounded_left_relaxed(b, i) {
                 continue;
             }
-            let body_end = run(b, prefix_end, is_token_char);
+            // The first byte-matching prefix fixes the end of the enclosing
+            // token run; every prefix tried at this byte shares it (prefix
+            // bytes are token characters).
+            let body_end = match run_end {
+                Some(e) => e,
+                None => {
+                    let e = run(b, prefix_end, is_token_char);
+                    run_end = Some(e);
+                    e
+                }
+            };
             let body_len = body_end - prefix_end;
-            if body_len >= min_body && body_len <= max_body {
+            if (min_body..=max_body).contains(&body_len) {
                 out.push(Match::new(kind.clone(), i, body_end));
-                matched_end = Some(body_end);
+                i_next = body_end;
                 break;
             }
+            if body_len > max_body {
+                too_long = true;
+            }
+            // Body too short: a shorter prefix shares the run and has a longer
+            // body, so keep trying lower-priority prefixes.
         }
-        i = matched_end.unwrap_or(i + 1);
+        if too_long && i_next == i + 1 {
+            i_next = run_end
+                .unwrap_or(i + 1)
+                .saturating_sub(resume_window)
+                .max(i + 1);
+        }
+        i = i_next;
     }
 }
 
@@ -923,6 +980,9 @@ impl Detector for PrivateKey {
             // The header must mention PRIVATE KEY before the closing dashes.
             let header_end = match input[after..].find("-----") {
                 Some(h) => after + h,
+                // No closing dashes anywhere after this header, so no complete
+                // block can follow it. Stop instead of letting the next BEGIN
+                // re-scan the whole tail (that was quadratic).
                 None => break,
             };
             let header = &input[after..header_end];
@@ -941,7 +1001,9 @@ impl Detector for PrivateKey {
                     continue;
                 }
             }
-            from = after;
+            // Either no END marker, or an END marker that is never closed:
+            // nothing after this header can form a complete block.
+            break;
         }
     }
 }
@@ -996,13 +1058,18 @@ impl Detector for Iban {
                 i += 1;
                 continue;
             }
-            // Consume the alphanumeric body (uppercase letters + digits only).
+            // Consume the alphanumeric body (uppercase letters + digits only),
+            // capped at 34 bytes (the IBAN maximum). A longer maximal run is
+            // rejected below by the length or right-boundary check, and the
+            // cap keeps the detector linear on runs with many UUDD heads
+            // (`AB12AB12...`) that would otherwise each re-walk the whole run.
             let mut j = i;
-            while j < n && (b[j].is_ascii_uppercase() || b[j].is_ascii_digit()) {
+            while j < n && j - i < 34 && (b[j].is_ascii_uppercase() || b[j].is_ascii_digit()) {
                 j += 1;
             }
             let len = j - i;
-            // IBANs are 15..=34 chars. Don't match if a token char follows.
+            // IBANs are 15..=34 chars. Don't match if a token char follows
+            // (the boundary also rejects the truncated prefix of a longer run).
             if (15..=34).contains(&len) && bounded_right(b, j) {
                 let candidate = &input[i..j];
                 if iban_mod97_ok(candidate) {
@@ -1384,6 +1451,14 @@ impl Detector for TelegramToken {
                     j += 1;
                 }
                 let digits_len = j - i;
+                if digits_len > MAX_ID {
+                    // Only the trailing MAX_ID digits of a long run can form a
+                    // valid bot id; jump to the first such candidate so a
+                    // digit-dense input is scanned once instead of re-walking
+                    // the whole run from every digit (that was quadratic).
+                    i = j - MAX_ID;
+                    continue;
+                }
                 if (MIN_ID..=MAX_ID).contains(&digits_len) && j < b.len() && b[j] == b':' {
                     let token_start = j + 1;
                     let token_end = run(b, token_start, is_token_char);

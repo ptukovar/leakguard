@@ -133,7 +133,7 @@ fn hash_mask_is_stable() {
     // Same email hashes to the same token.
     let parts: Vec<&str> = a.split(" and ").collect();
     assert_eq!(parts[0], parts[1]);
-    assert!(parts[0].starts_with("[EMAIL:"));
+    assert!(parts[0].starts_with("[EMAIL#"));
 }
 
 #[test]

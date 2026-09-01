@@ -23,38 +23,56 @@ USAGE:
     stdout. Line endings are preserved; multiline PEM private keys are redacted
     as a single block.
 
-OPTIONS:
-    --mask <MODE>     label (default) | fixed | char | partial | hash | template
-    --template <STR>  template string for --mask template (default: <{LABEL}>)
-    --fixed <STR>     replacement string for --mask fixed (default: [REDACTED])
-    --char <C>        fill char for char/partial masks (default: *)
-    --keep <N>        characters to keep for --mask partial (default: 4;
-                      clamped to at most half the match so a mask can never
-                      return the value unchanged)
-    --ignore <LIST>   comma-separated list of literal strings to allowlist/skip
-    --ignore-file <F> read newline-separated allowlist strings from file <F>
-    --redact-word <W> redact specific word literal as [REDACTED:KEYWORD]
-    --redact-literal <S> redact literal with kind (e.g. AcmeCorp:CLIENT)
+MASKING:
+    --mask <MODE>       label (default) | fixed | char | partial | hash | template
+    --template <STR>    template string for --mask template (default: <{LABEL}>)
+    --fixed <STR>       replacement string for --mask fixed (default: [REDACTED])
+    --char <C>          fill char for char/partial masks (default: *)
+    --keep <N>          characters to keep for --mask partial (default: 4;
+                        clamped to at most half the match, so a mask can never
+                        return the value unchanged)
+
+DETECTION:
+    --only <LIST>       comma-separated kinds to detect (e.g. email,ipv4,jwt)
+    --without <LIST>    comma-separated kinds to skip from the selected detectors
+    --ignore <LIST>     comma-separated literal strings to allowlist/skip
+    --ignore-file <F>   read newline-separated allowlist strings from file <F>
+    --redact-word <W>   redact a specific word or phrase as [REDACTED:KEYWORD]
+    --redact-literal <S> redact a literal, optionally with a kind:
+                        WORD        -> [REDACTED:KEYWORD]
+                        WORD:KIND    -> [REDACTED:KIND]: a built-in kind name,
+                                        or any custom label (uppercased), e.g.
+                                        AcmeCorp:CLIENT
     --redact-words-file <F> read newline-separated word literals from file <F>
-    --only <LIST>     comma-separated kinds to detect (e.g. email,ipv4,jwt)
-    --without <LIST>  comma-separated kinds to skip from the selected detectors
-    --format <FMT>    output format: text (default) or json (NDJSON: one
-                      compact JSON object per input line)
-    --json            shortcut for --format json
-    --show-values     include the matched secret text in --json output
-                      (omitted by default so findings can be logged safely)
-    --stats           print a summary table of redacted matches to stderr
-    --check           don't print; exit 1 if any sensitive data is found
-    -v, --verbose     with --check, print matched kinds and offsets to stderr
-    --list-kinds      print supported kind names, then exit
-    -h, --help        print this help
-    -V, --version     print version
+
+OUTPUT:
+    --format <FMT>      output format: text (default) or json (NDJSON: one
+                        compact JSON object per input chunk; matched values are
+                        omitted unless --show-values)
+    --json              shortcut for --format json
+    --show-values       include the matched secret text in --json output
+                        (omitted by default so findings can be logged safely)
+    --stats             print a summary of redacted matches to stderr
+    --check             don't print; exit 1 if any sensitive data is found
+    -v, --verbose       with --check, write one line per finding to stderr:
+                          leakguard: SOURCE: line N: col M: found KIND at S..E
+                        (kind, offsets, line and column only -- never values)
+
+META:
+    --list-kinds        print supported kind names, then exit
+    -h, --help          print this help
+    -V, --version       print version
+
+EXIT STATUS:
+    0   no sensitive data found
+    1   sensitive data found under --check
+    2   usage error, unreadable file, or I/O error
 
 KINDS:
     email, credit_card, ipv4, ipv6, jwt, us_ssn, mac, aws_access_key,
     url_credentials, phone, github_token, slack_token, stripe_key,
     google_api_key, openai_key, private_key, iban, azure_connection_string,
-    telegram_token, discord_token
+    telegram_token, discord_token, generic_secret (opt-in high-entropy scan)
 ";
 
 const KIND_NAMES: &[&str] = &[
@@ -78,6 +96,7 @@ const KIND_NAMES: &[&str] = &[
     "azure_connection_string",
     "telegram_token",
     "discord_token",
+    "generic_secret",
 ];
 
 fn parse_kind(s: &str) -> Option<Kind> {
@@ -102,6 +121,7 @@ fn parse_kind(s: &str) -> Option<Kind> {
         "azure_connection_string" | "azure" => Kind::AzureConnectionString,
         "telegram_token" | "telegram" | "tg" => Kind::TelegramToken,
         "discord_token" | "discord" => Kind::DiscordToken,
+        "generic_secret" | "generic" | "high_entropy" => Kind::GenericSecret,
         _ => return None,
     })
 }
@@ -118,7 +138,10 @@ fn parse_kind_list(value: &str, flag: &str) -> io::Result<Vec<Kind>> {
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("unknown kind for {flag}: {part}"),
+                    format!(
+                        "unknown kind for {flag}: {part}\nvalid kinds: {}",
+                        KIND_NAMES.join(", ")
+                    ),
                 ))
             }
         }
@@ -209,12 +232,20 @@ fn run() -> io::Result<ExitCode> {
             "--redact-literal" => {
                 let spec = next_val(&mut args, "--redact-literal")?;
                 if let Some((word, kind_str)) = spec.split_once(':') {
-                    let kind = parse_kind(kind_str).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("unknown kind for --redact-literal: {kind_str}"),
-                        )
-                    })?;
+                    // A built-in kind name, or any custom label (uppercased so
+                    // `AcmeCorp:client` and `AcmeCorp:CLIENT` behave alike).
+                    // Kind::Custom holds a &'static str, so custom labels are
+                    // deliberately leaked: one tiny allocation per --redact-literal
+                    // flag in a short-lived process is preferable to copying or
+                    // a lifetime bookkeeping table.
+                    let kind = match parse_kind(kind_str) {
+                        Some(k) => k,
+                        None => {
+                            let label: &'static str =
+                                Box::leak(kind_str.to_ascii_uppercase().into_boxed_str());
+                            Kind::Custom(label)
+                        }
+                    };
                     redact_literals.push((word.to_string(), kind));
                 } else {
                     redact_literals.push((spec, Kind::Custom("KEYWORD")));

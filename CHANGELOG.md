@@ -6,6 +6,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-01
+
+### Added
+- `GenericSecret` detector (opt-in `HighEntropy`), accessible via
+  `Kind::GenericSecret`, `Redactor::only(&[Kind::GenericSecret])`, and CLI
+  `--only generic_secret`. The detector uses a byte-level Shannon-entropy
+  heuristic over sliding windows, configurable through
+  `HighEntropy::new(min_len, min_entropy)`.
+- Fuzz-style invariant tests covering every built-in detector under every
+  mask: span validity, UTF-8 boundary safety, sorted non-overlapping outputs,
+  mask reconstruction correctness, and `clean` convergence (idempotence or
+  fixed-point within a bounded number of passes).
+- Adversarial input tests for every detector (empty, 1-byte, boundary, CRLF,
+  NUL, digit-adjacency, repeated-prefix runs) — none panic or emit invalid
+  offsets.
+- `--redact-literal KIND:CUSTOM` syntax for custom kind labels on the CLI
+  (`--redact-literal AcmeCorp:CLIENT` -> `[REDACTED:CLIENT]`).
+- Performance gate benchmarks in `examples/bench.rs`: serial and parallel
+  throughput printed against the v0.8.1 baselines.
+
+### Changed
+- **`Mask::Hash` separator changed from `:` to `#`.** The 0.8.x
+  `[LABEL:hhhhhhhh]` form could be re-detected as `UrlCredentials` when
+  followed by `@host` (e.g. `[EMAIL:3f2a91c8]@example.com`). The new
+  `[LABEL#hhhhhhhh]` uses `#`, which is never a valid secret body character
+  and terminates a URL authority, making `clean` idempotent under `Mask::Hash`.
+  **Migration:** consumers that parse `[LABEL:hhhhhhhh]` from `Mask::Hash`
+  output must update their parsers to expect `[LABEL#hhhhhhhh]`.
+- `Redactor::clean_iter` now accepts `AsRef<str>` (both `&str` and `String`
+  inputs) instead of requiring `std::fmt::Display`.
+- `all_detectors()` now includes `HighEntropy`, so `Redactor::only` and CLI
+  `--only generic_secret` select a working scanner.
+- Help text and exit-code documentation improved.
+- PrivateKey moved to first priority in `default_detectors()` to prevent
+  PEM-block body from being claimed by another detector.
+
+### Fixed
+- **Five quadratic bugs:**
+  - `TelegramToken` no longer re-scans the token body for every leading digit.
+  - `scan_prefixed_any` (`GitHubToken` / `OpenAiKey`) advances past matches
+    instead of re-triggering after every byte.
+  - `Iban` no longer re-scans the same run from the same start.
+  - `PrivateKey` no longer re-scans the entire assembled block on every line.
+- CLI unterminated PEM-block buffer now has explicit caps (1 MiB / 10 000
+  lines) to prevent unbounded memory growth.
+
+### API Freeze
+This is the last minor release before 1.0.0. The public API is frozen after
+0.9.0:
+- `Mask` is `#[non_exhaustive]` - match arms must include a wildcard.
+- `Kind` is `#[non_exhaustive]` - match arms must include a wildcard.
+- The `Detector` trait uses `&self` detection; `FnDetector` signature is stable.
+- No new default-on detectors will be added in 0.9.x patch releases.
+- CLI flag names, JSON field names, and exit codes are stable.
+
 ## [0.8.1] - 2026-08-11
 
 ### Changed
@@ -145,7 +200,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `leakguard` CLI for redacting stdin/files, with a `--check` mode for CI guards.
 - `redact_logs` example and an integration test suite.
 
-[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/ptukovar/leakguard/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/ptukovar/leakguard/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/ptukovar/leakguard/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ptukovar/leakguard/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/ptukovar/leakguard/compare/v0.6.0...v0.6.1

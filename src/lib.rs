@@ -107,6 +107,10 @@ pub enum Mask {
     ///
     /// Use `Mask::fixed("...")` for a concise constructor that accepts both
     /// string literals and owned [`String`] values.
+    ///
+    /// The replacement should not itself look like sensitive data: `clean` is
+    /// idempotent only when a mask's output is not re-detected by the active
+    /// detectors.
     Fixed(Cow<'static, str>),
     /// Replace each *character* of the match with `ch`.
     Char(char),
@@ -116,6 +120,13 @@ pub enum Mask {
     /// up) is always masked. A mask can therefore never return the matched
     /// text unchanged, no matter how large `keep_last` is: asking to keep 99
     /// characters of a 16-character card still masks the leading 8.
+    ///
+    /// Because the preserved tail contains raw characters, it can occasionally
+    /// itself resemble another secret (the tail of `2001:db8::1` is `8::1`, a
+    /// valid compressed IPv6 address). `clean` then redacts that fragment on a
+    /// second pass; this is inherent to partial disclosure, so under
+    /// `Mask::Partial` `clean` is guaranteed to reach a fixed point within one
+    /// extra application rather than being idempotent in a single pass.
     Partial {
         /// Number of trailing characters to preserve. Clamped to at most half
         /// the match length, so some of the value is always hidden.
@@ -126,6 +137,14 @@ pub enum Mask {
     /// Replace with a short, stable, non-cryptographic fingerprint so equal
     /// values stay equal. This is intended for correlation, **not** for
     /// anonymization or security against guessing/dictionary attacks.
+    ///
+    /// The rendered token is `[LABEL#hhhhhhhh]`, e.g. `[EMAIL#3f2a91c8]`. `#`
+    /// is never a secret body character and terminates a URL authority for the
+    /// [`UrlCredentials`](crate::detectors::UrlCredentials) detector, so a hash
+    /// token can never be re-detected as another secret and `clean` stays
+    /// idempotent under this mask. (The 0.8.x `[LABEL:hhhhhhhh]` form *could*
+    /// be re-detected when embedded in `...@host`; see the 0.9.0 CHANGELOG
+    /// migration notes.)
     Hash,
     /// Replace each match using a template string where `{LABEL}` or `{KIND}` is
     /// replaced with the uppercase kind label (e.g. `EMAIL`) and `{label}` or
@@ -214,7 +233,9 @@ impl Redactor {
     /// Create a redactor that only enables the given built-in [`Kind`]s.
     ///
     /// This can select **any** built-in detector, including the opt-in
-    /// [`Kind::PhoneNumber`] that [`Redactor::new`] leaves disabled.
+    /// [`Kind::PhoneNumber`] and [`Kind::GenericSecret`] that
+    /// [`Redactor::new`] leaves disabled. The opt-in detectors use their
+    /// default settings (see [`detectors::HighEntropy`] for tuning).
     ///
     /// Unknown / [`Kind::Custom`] kinds are ignored (add those via
     /// [`with_detector`](Redactor::with_detector)).
@@ -411,15 +432,35 @@ impl Redactor {
     }
 
     /// Return a vector of cleaned copies for an iterator of input strings.
-    pub fn clean_iter<'a, I>(&self, inputs: I) -> Vec<String>
+    ///
+    /// Accepts both borrowed (`&str`) and owned ([`String`]) inputs, matching
+    /// the item bound of [`clean_iter_with_stats`](Self::clean_iter_with_stats).
+    ///
+    /// ```
+    /// use leakguard::Redactor;
+    ///
+    /// let s = Redactor::new();
+    /// let borrowed = ["alice@example.com", "10.0.0.1"];
+    /// assert!(s.clean_iter(borrowed).iter().all(|c| c.starts_with('[')));
+    ///
+    /// // Owned strings are accepted too.
+    /// let owned = vec![String::from("a@b.com")];
+    /// assert_eq!(s.clean_iter(owned), vec!["[REDACTED:EMAIL]".to_string()]);
+    /// ```
+    pub fn clean_iter<I, S>(&self, inputs: I) -> Vec<String>
     where
-        I: IntoIterator<Item = &'a str>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
     {
-        inputs.into_iter().map(|s| self.clean(s)).collect()
+        inputs.into_iter().map(|s| self.clean(s.as_ref())).collect()
     }
 
     /// Return a cleaned copy of `input` with every match rewritten per the
     /// configured [`Mask`].
+    ///
+    /// `clean` always returns a new owned [`String`]. On hot paths where most
+    /// inputs contain no secrets, test [`is_dirty`](Self::is_dirty) first,
+    /// or check that [`find`](Self::find) is empty, to avoid the allocation.
     pub fn clean(&self, input: &str) -> String {
         let matches = self.find(input);
         self.render_matches(input, &matches)
@@ -527,7 +568,11 @@ impl Redactor {
                 s.extend(original.chars().skip(masked));
                 s
             }
-            Mask::Hash => format!("[{}:{:08x}]", m.kind.label(), fnv1a(original.as_bytes())),
+            // The `#` separator (not `:`) keeps the token inert: a colon inside a URL
+            // authority would make `[LABEL#hex]@host` re-detect as
+            // `UrlCredentials` on a second `clean` pass, breaking idempotence
+            // and correlation-token stability.
+            Mask::Hash => format!("[{}#{:08x}]", m.kind.label(), fnv1a(original.as_bytes())),
             Mask::Template(tmpl) => {
                 let label_upper = m.kind.label();
                 let mut out = String::with_capacity(tmpl.len() + label_upper.len());
@@ -598,10 +643,14 @@ fn default_detectors() -> Vec<Box<dyn Detector>> {
 }
 
 /// Every built-in [`Kind`] that [`Redactor::only`] can construct, in the same
-/// priority order as [`default_detectors`]. Includes the opt-in detectors.
+/// priority order as [`default_detectors`]. Includes the opt-in detectors at
+/// their default settings, so `--only generic_secret` (and
+/// `Redactor::only(&[Kind::GenericSecret])`) selects a working [`HighEntropy`]
+/// scanner.
 fn all_detectors() -> Vec<Box<dyn Detector>> {
     let mut v = default_detectors();
     v.push(Box::new(detectors::PhoneNumber));
+    v.push(Box::<detectors::HighEntropy>::default());
     v
 }
 

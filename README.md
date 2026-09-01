@@ -47,7 +47,7 @@ fills that gap with:
 ```toml
 # Library
 [dependencies]
-leakguard = "0.8.1"
+leakguard = "0.9.0"
 ```
 
 ```sh
@@ -165,7 +165,7 @@ scoped standard library threads:
 
 ```toml
 [dependencies]
-leakguard = { version = "0.8", features = ["parallel"] }
+leakguard = { version = "0.9", features = ["parallel"] }
 ```
 
 ```rust
@@ -325,7 +325,7 @@ redaction on a large synthetic input.
 
 ```toml
 [dependencies]
-leakguard = { version = "0.8", default-features = false }
+leakguard = { version = "0.9", default-features = false }
 ```
 
 This drops the CLI and `std`-only conveniences but keeps the full detection and
