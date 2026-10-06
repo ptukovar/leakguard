@@ -9,6 +9,12 @@
 //! `Redactor::clean_parallel` for large inputs. These APIs use scoped standard
 //! library threads and keep the crate dependency-free.
 //!
+//! # Stability and SemVer
+//!
+//! The 1.0.0 API, CLI, MSRV, and deprecation policy are documented in the
+//! [Stability and SemVer section of the
+//! README](https://github.com/ptukovar/leakguard#stability-and-semver).
+//!
 //! # Built-in detectors
 //!
 //! Enabled by [`Redactor::new`]:

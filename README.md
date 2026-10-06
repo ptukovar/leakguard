@@ -47,13 +47,41 @@ fills that gap with:
 ```toml
 # Library
 [dependencies]
-leakguard = "0.9.1"
+leakguard = "1.0.0"
 ```
 
 ```sh
 # CLI
 cargo install leakguard
 ```
+
+## Stability and SemVer
+
+leakguard 1.0.0 makes the existing public API, frozen since 0.9.0, a SemVer
+stability commitment. Existing public Rust items, including names, public
+fields, signatures, enum variants, and `Kind` labels, are compatibility
+commitments. `Mask` and `Kind` remain `#[non_exhaustive]`. CLI flags, output
+contracts, and exit codes are also compatibility commitments. Compatible
+additions may be made in 1.x; breaking changes require 2.0.0.
+
+The CLI contract includes the `--check --verbose` line format
+(`leakguard: SOURCE: line N: col M: found KIND at S..E`) and NDJSON fields: the
+`source` and `matches` envelope, each match's `kind`, `start`, `end`, `line`, and
+`column`, and optional `text` emitted only with `--show-values`. Exit status is
+0 for successful processing (including no findings under `--check`), 1 when
+`--check` finds a match, and 2 for a usage or I/O error.
+
+The MSRV is Rust 1.70.0. It may be raised in a minor 1.x release, with the new
+MSRV documented in the changelog; it will not be raised in a patch release.
+
+A public API item or CLI option intended for removal will first be deprecated
+and accompanied by a warning for at least one minor release. Removal of a public
+API or CLI contract requires 2.0.0.
+
+These compatibility commitments do not make detection complete or masking
+cryptographically secure. leakguard remains a best-effort redaction tool; see
+[Security model and limitations](#security-model-and-limitations).
+`Mask::Hash` is a non-cryptographic correlation fingerprint, not anonymization.
 
 ## Library usage
 
@@ -165,7 +193,7 @@ scoped standard library threads:
 
 ```toml
 [dependencies]
-leakguard = { version = "0.9", features = ["parallel"] }
+leakguard = { version = "1.0", features = ["parallel"] }
 ```
 
 ```rust
@@ -325,7 +353,7 @@ redaction on a large synthetic input.
 
 ```toml
 [dependencies]
-leakguard = { version = "0.9", default-features = false }
+leakguard = { version = "1.0", default-features = false }
 ```
 
 This drops the CLI and `std`-only conveniences but keeps the full detection and
