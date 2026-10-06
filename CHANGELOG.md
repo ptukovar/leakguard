@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-06
+
+### Added
+- Release-consistency test pins the package version to 1.0.0 and checks the
+  README install snippet.
+
+### Changed
+- Document the 1.0.0 SemVer, MSRV, deprecation, CLI, JSON, and exit-code
+  commitments.
+
 ## [0.9.1] - 2026-09-01
 
 ### Fixed
@@ -206,7 +216,8 @@ This is the last minor release before 1.0.0. The public API is frozen after
 - `leakguard` CLI for redacting stdin/files, with a `--check` mode for CI guards.
 - `redact_logs` example and an integration test suite.
 
-[Unreleased]: https://github.com/ptukovar/leakguard/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/ptukovar/leakguard/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ptukovar/leakguard/compare/v0.9.1...v1.0.0
 [0.9.1]: https://github.com/ptukovar/leakguard/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ptukovar/leakguard/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/ptukovar/leakguard/compare/v0.8.0...v0.8.1
